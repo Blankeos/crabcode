@@ -1869,8 +1869,6 @@ impl App {
         };
         let is_child_session = self.session_manager.parent_id_of(&session_id).is_some();
 
-        self.ensure_session_view_state(&session_id);
-
         // Snapshot composer before borrowing the view state (disjoint fields,
         // but keep the borrow short and explicit).
         let draft_text = if is_child_session {
@@ -1883,7 +1881,13 @@ impl App {
         } else {
             self.input.local_image_paths_for_submission()
         };
-        if let Some(state) = self.session_view_states.get_mut(&session_id) {
+        // The live chat is already hydrated. Creating a hydrated placeholder
+        // here would clone the entire history only to immediately drop it.
+        {
+            let state = self
+                .session_view_states
+                .entry(session_id)
+                .or_insert_with(|| ClientSessionState::with_chat(Chat::new()));
             state.chat = std::mem::take(&mut self.chat_state.chat);
             state.find_bar = std::mem::take(&mut self.find_bar);
             state.input_draft = draft_text;
@@ -1894,9 +1898,9 @@ impl App {
     /// Free the rebuildable render caches of background chats that are not
     /// part of the current session family (shared root session). Chats inside
     /// the family keep their caches so cycling between subagent tabs stays a
-    /// warm-cache render, while memory does not scale with every session
-    /// visited during a run.
-    fn release_render_caches_outside_current_family(&mut self) {
+    /// warm-cache render. Also retain the immediately previous chat so hopping
+    /// between two histories is warm, without retaining every visited history.
+    fn release_render_caches_outside_current_family(&mut self, previous_id: Option<&str>) {
         let current_root = self
             .session_manager
             .get_current_session_id()
@@ -1905,7 +1909,7 @@ impl App {
         let manager = &self.session_manager;
 
         for (id, state) in self.session_view_states.iter_mut() {
-            if current_id.as_deref() == Some(id.as_str()) {
+            if current_id.as_deref() == Some(id.as_str()) || previous_id == Some(id.as_str()) {
                 continue;
             }
             let in_family = current_root
@@ -1948,13 +1952,14 @@ impl App {
         if !self.session_manager.ensure_session_loaded(session_id) {
             return false;
         }
+        let previous_id = self.session_manager.get_current_session_id().cloned();
         self.save_active_session_view_state();
         self.session_manager.switch_session(session_id);
         self.pending_session_title = None;
         self.load_session_view_state(session_id);
         // Pending hitboxes are re-rendered for the new session; drop stale hover.
         self.clear_queued_hover();
-        self.release_render_caches_outside_current_family();
+        self.release_render_caches_outside_current_family(previous_id.as_deref());
         let is_child_session = self.session_manager.parent_id_of(session_id).is_some();
         self.base_focus = if !is_child_session
             && self.chat_state.chat.messages.is_empty()
@@ -8388,29 +8393,29 @@ impl App {
                     return;
                 }
 
-                let (undone_message, removed_count): (
-                    Option<crate::session::types::Message>,
-                    usize,
-                ) = {
+                let (session_id, undone_message, removed_count) = {
                     if let Some(session) = self.session_manager.get_current_session() {
                         let len = session.messages.len();
                         let message = session.messages.get(idx).cloned();
-                        session.messages.truncate(idx);
-                        (message, len.saturating_sub(idx))
+                        (session.id.clone(), message, len.saturating_sub(idx))
                     } else {
                         return;
                     }
                 };
 
-                let remaining: Vec<crate::session::types::Message> = {
-                    if let Some(session) = self.session_manager.get_current_session() {
-                        session.messages.clone()
-                    } else {
-                        return;
-                    }
-                };
+                if let Err(error) = self
+                    .session_manager
+                    .truncate_session_messages(&session_id, idx)
+                {
+                    push_toast(Toast::new(
+                        format!("Could not undo message: {error:?}"),
+                        ToastLevel::Error,
+                        None,
+                    ));
+                    return;
+                }
 
-                self.chat_state.chat.replace_messages(remaining);
+                self.chat_state.chat.truncate_messages(idx);
                 self.chat_state.chat.scroll_offset = usize::MAX;
                 self.chat_state.chat.clear_highlighted_message();
 
@@ -15252,6 +15257,33 @@ mod tests {
     }
 
     #[test]
+    fn undo_user_message_persists_prefix_without_cloning_it() {
+        let mut app = test_app();
+        app.session_manager = SessionManager::new().with_history().unwrap();
+        let id = app.create_new_session(Some("Undo persistence".to_string()));
+        add_current_session_message(&mut app, crate::session::types::Message::user("keep"));
+        add_current_session_message(
+            &mut app,
+            crate::session::types::Message::assistant("answer"),
+        );
+        add_current_session_message(
+            &mut app,
+            crate::session::types::Message::user("restore input"),
+        );
+        let prefix_ptr = app.chat_state.chat.messages[0].content.as_ptr();
+        app.message_actions_index = Some(2);
+        app.execute_message_action("undo");
+        assert_eq!(app.chat_state.chat.messages.len(), 2);
+        assert_eq!(app.chat_state.chat.messages[0].content.as_ptr(), prefix_ptr);
+        assert_eq!(app.input.get_text(), "restore input");
+        let mut reopened = SessionManager::new().with_history().unwrap();
+        assert!(reopened.switch_session(&id));
+        assert_eq!(reopened.get_current_session().unwrap().messages.len(), 2);
+        // Remove only this test's generated session.
+        app.session_manager.delete_session(&id);
+    }
+
+    #[test]
     fn undo_user_message_restores_local_image_attachments_to_input() {
         let mut app = test_app();
         app.create_new_session(Some("Timeline".to_string()));
@@ -17086,19 +17118,55 @@ mod tests {
             .into_iter()
             .map(|message| message.try_into().unwrap())
             .collect();
+        let snapshot = |messages: &[crate::session::types::Message]| {
+            serde_json::to_value(
+                messages
+                    .iter()
+                    .cloned()
+                    .map(crate::persistence::Message::from)
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap()
+        };
+        let original_len = messages.len();
+        assert!(original_len > 0);
         let mut app = test_app();
         app.session_manager = SessionManager::new().with_history().unwrap();
         app.small_model = None;
         let session_id = app.create_new_session(Some("Offline submit benchmark".to_string()));
         app.chat_state.chat.replace_messages(messages);
         assert!(app.persist_chat_messages_for_session(&session_id));
+        // Drop every loaded view and manager: this is a cold application-level
+        // open, not a cold filesystem/SQLite page-cache measurement.
+        drop(app);
+        let mut app = test_app();
+        app.small_model = None;
+        let started = std::time::Instant::now();
+        app.session_manager = SessionManager::new().with_history().unwrap();
+        let manager_load = started.elapsed();
+        assert!(app.switch_to_session(&session_id));
+        let cold_open = started.elapsed();
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let cold_frame = started.elapsed();
+        assert_eq!(app.chat_state.chat.messages.len(), original_len);
+
+        let away_id = app.create_new_session(Some("Offline switch target".to_string()));
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let started = std::time::Instant::now();
+        assert!(app.switch_to_session(&session_id));
+        let warm_switch = started.elapsed();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let warm_frame = started.elapsed();
+        assert_eq!(app.chat_state.chat.messages.len(), original_len);
+        // Compare the loaded persistence round-trip, which normalizes legacy parts.
+        let original_messages = snapshot(&app.chat_state.chat.messages);
         app.base_focus = BaseFocus::Chat;
         // A long-running session already has a tokenizer from earlier turns.
         app.chat_state
             .chat
             .prepare_streaming_token_counter(&app.model);
-        let mut terminal =
-            ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 40)).unwrap();
         terminal.draw(|frame| app.render(frame)).unwrap();
 
         let started = std::time::Instant::now();
@@ -17111,6 +17179,16 @@ mod tests {
             .cancel_token
             .cancel();
 
+        assert_eq!(app.chat_state.chat.messages.len(), original_len + 2);
+        assert_eq!(
+            app.session_manager
+                .get_session_ref(&session_id)
+                .unwrap()
+                .messages
+                .len(),
+            original_len + 2
+        );
+
         // Measure the removed full-history operations separately, on the same
         // warmed transcript. These are not part of the optimized submit path.
         let started = std::time::Instant::now();
@@ -17120,11 +17198,52 @@ mod tests {
         app.chat_state.chat.mark_render_dirty();
         terminal.draw(|frame| app.render(frame)).unwrap();
         let full_render = started.elapsed();
-        eprintln!(
-            "offline replay: submit={submit:?}, submit-to-frame={first_frame:?}, \
-             full-history save={full_save:?}, full-history redraw={full_render:?}"
-        );
+        // Cancellation alone leaves is_streaming set. Finalize outside the
+        // undo interval, then warm the cache again before measuring truncation.
         tokio::task::yield_now().await;
+        app.cancelled_streaming_session(&session_id);
+        assert!(!app.is_streaming);
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        assert!(app.chat_state.chat.has_render_cache());
+        let dao = crate::persistence::HistoryDAO::new().unwrap();
+        let db_id = app.session_manager.get_db_id(&session_id).unwrap();
+        let persisted_prefix =
+            serde_json::to_value(&dao.get_messages(db_id).unwrap()[..original_len]).unwrap();
+        app.message_actions_index = Some(original_len);
+        let started = std::time::Instant::now();
+        app.execute_message_action("undo");
+        let undo = started.elapsed();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let undo_frame = started.elapsed();
+        assert_eq!(app.chat_state.chat.messages.len(), original_len);
+        assert_eq!(app.input.get_text(), "Offline benchmark prompt");
+        assert_eq!(
+            app.session_manager
+                .get_session_ref(&session_id)
+                .unwrap()
+                .messages
+                .len(),
+            original_len
+        );
+        assert!(
+            serde_json::to_value(dao.get_messages(db_id).unwrap()).unwrap() == persisted_prefix
+        );
+        let mut reopened = SessionManager::new().with_history().unwrap();
+        assert!(reopened.switch_session(&session_id));
+        assert_eq!(
+            reopened.get_current_session().unwrap().messages.len(),
+            original_len
+        );
+        assert!(snapshot(&app.chat_state.chat.messages) == original_messages);
+        eprintln!(
+            "offline replay: messages={original_len}, manager-load={manager_load:?}, \
+             cold-open-total={cold_open:?}, cold-open-to-frame-total={cold_frame:?}, \
+             warm-switch={warm_switch:?}, warm-switch-to-frame-total={warm_frame:?}, \
+             submit={submit:?}, submit-to-frame-total={first_frame:?}, \
+             full-history save={full_save:?}, full-history redraw={full_render:?}, \
+             undo={undo:?}, undo-to-frame-total={undo_frame:?}"
+        );
+        assert!(app.session_manager.try_delete_session(&away_id).unwrap());
         assert!(app.session_manager.try_delete_session(&session_id).unwrap());
     }
 
@@ -17914,6 +18033,56 @@ mod tests {
             .session_view_states
             .get(&other)
             .is_some_and(|state| !state.chat.has_render_cache()));
+    }
+
+    #[test]
+    fn opening_history_then_returning_keeps_messages_and_warm_cache() {
+        use crate::session::types::Message;
+        let mut app = test_app();
+        let colors = app.get_current_theme_colors();
+        let first = app.create_new_session(Some("Synthetic history".to_string()));
+        let messages: Vec<_> = (0..80)
+            .flat_map(|idx| {
+                [
+                    Message::user(format!("Question {idx}")),
+                    Message::assistant(
+                        "Answer with https://example.com and **markdown**".repeat(20),
+                    ),
+                ]
+            })
+            .collect();
+        app.session_manager
+            .replace_session_messages(&first, messages.clone())
+            .unwrap();
+        // Simulate an as-yet unhydrated history (not an already-live chat).
+        app.chat_state.chat.clear();
+        app.session_view_states.remove(&first);
+        app.load_session_view_state(&first);
+        assert_eq!(app.chat_state.chat.messages.len(), messages.len());
+        assert_eq!(
+            app.chat_state.chat.messages[159].content,
+            messages[159].content
+        );
+        app.chat_state
+            .chat
+            .ensure_render_cache(80, "model", &colors);
+        let allocation = app.chat_state.chat.messages.as_ptr();
+
+        // An existing unrelated session, so the public switch path does not
+        // create or save a second copy of the first history.
+        let second = app
+            .session_manager
+            .create_session(Some("Other".to_string()));
+        app.session_manager.switch_session(&first);
+        assert!(app.switch_to_session(&second));
+        assert!(app.session_view_states[&first].chat.has_render_cache());
+        assert!(app.switch_to_session(&first));
+        assert_eq!(app.chat_state.chat.messages.as_ptr(), allocation);
+        assert!(app.chat_state.chat.has_render_cache());
+        app.chat_state
+            .chat
+            .ensure_render_cache(80, "model", &colors);
+        assert_eq!(app.chat_state.chat.messages.len(), messages.len());
     }
 
     #[test]

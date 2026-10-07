@@ -1057,6 +1057,7 @@ fn assistant_tool_result_ids(message: &Message) -> std::collections::HashSet<Str
         .collect()
 }
 
+#[cfg(test)]
 fn assistant_tool_part_content(
     message: &Message,
     part: &crate::session::types::MessagePart,
@@ -1920,8 +1921,8 @@ impl Chat {
 
     pub fn add_message(&mut self, message: Message) {
         let mut dirty_from = self.messages.len();
-        // Only grouped tool rows look forward into subsequent messages. Ordinary
-        // messages (including their trailing spacing) do not depend on being last.
+        // Grouped tool rows can absorb an appended tool; rebuild from their
+        // start rather than keeping a partial group.
         let extends_task = task_tool_item_for_message(&message).is_some();
         let extends_exploration = exploration_tool_item_for_message(&message).is_some();
         if extends_task || extends_exploration {
@@ -1936,6 +1937,16 @@ impl Chat {
                     break;
                 }
             }
+        }
+        // A completed assistant's footer disappears when another assistant or
+        // tool follows it (including after a truncation/undo).
+        if matches!(message.role, MessageRole::Assistant | MessageRole::Tool)
+            && self
+                .messages
+                .last()
+                .is_some_and(|last| last.role == MessageRole::Assistant)
+        {
+            dirty_from = dirty_from.min(self.messages.len() - 1);
         }
         // A new incomplete assistant takes over the streaming renderer from the
         // previous segment, which must then render from its own message content.
@@ -1993,8 +2004,30 @@ impl Chat {
     }
 
     pub fn truncate_messages(&mut self, len: usize) {
+        if len >= self.messages.len() {
+            return;
+        }
+        // The new last message can change its footer/attachment when its
+        // successor disappears. Tail rebuilding also backs up to a tool-group
+        // boundary and respects an earlier pending streaming invalidation.
+        let dirty_from = self
+            .pending_streaming_render_dirty_from
+            .map_or(len.saturating_sub(1), |idx| idx.min(len.saturating_sub(1)));
+        let pending = self
+            .pending_streaming_render_dirty_from
+            .filter(|idx| *idx < len);
+        let content_dirty = self.pending_streaming_content_dirty && pending.is_some();
         self.messages.truncate(len);
-        self.invalidate_cache();
+        self.clear_ordered_tool_prefix_cache_from(dirty_from);
+        self.ordered_markdown_cache
+            .borrow_mut()
+            .retain(|(idx, _), _| *idx < dirty_from);
+        self.ordered_tool_row_cache
+            .borrow_mut()
+            .retain(|(idx, _), _| *idx < dirty_from);
+        self.invalidate_cache_from(dirty_from);
+        self.pending_streaming_render_dirty_from = pending;
+        self.pending_streaming_content_dirty = content_dirty;
     }
 
     pub fn mark_render_dirty(&mut self) {
@@ -5213,13 +5246,21 @@ impl Chat {
                                 emitted_anything = true;
 
                                 let row_key = (idx, part_idx);
-                                let row_hash = tool_part_row_hash(message, part);
+                                // Historical rows never populate the streaming
+                                // row cache; don't hash megabytes of output on
+                                // their first render for a guaranteed miss.
+                                let row_hash = if is_streaming {
+                                    tool_part_row_hash(message, part)
+                                } else {
+                                    0
+                                };
                                 let cached_row = self
                                     .ordered_tool_row_cache
                                     .borrow()
                                     .get(&row_key)
                                     .filter(|cached| {
-                                        cached.data_hash == row_hash
+                                        is_streaming
+                                            && cached.data_hash == row_hash
                                             && cached.width == max_width
                                             && cached.colors_hash == colors_hash
                                     })
@@ -5230,14 +5271,23 @@ impl Chat {
                                     continue;
                                 }
 
-                                let Some(content) =
-                                    assistant_tool_part_content(message, part, &result_ids)
-                                else {
-                                    continue;
-                                };
-                                let tool_message = Message::tool(content);
+                                let mut parsed = parsed_tool_message_from_object(
+                                    part.data.as_object().expect("checked above"),
+                                    true,
+                                );
+                                if part.part_type == "tool_call"
+                                    && part.data.get("status").is_none()
+                                {
+                                    parsed.status = "running".to_string();
+                                } else if part.part_type == "tool_result" && parsed.args.is_none() {
+                                    parsed.args = part
+                                        .tool_id()
+                                        .and_then(|id| message.tool_call_part_data(id))
+                                        .and_then(|call| call.get("args"))
+                                        .cloned();
+                                }
                                 let tool_lines: Vec<Line<'static>> = self
-                                    .format_tool_row(&tool_message, max_width, colors, true)
+                                    .format_parsed_tool_row(parsed, max_width, colors, true)
                                     .into_iter()
                                     .map(line_to_static)
                                     .collect();
@@ -5271,7 +5321,7 @@ impl Chat {
                     if !emitted_anything {
                         if is_streaming || (message.is_complete && message.was_interrupted) {
                             let metadata =
-                                self.format_metadata(message, model, colors, !is_streaming);
+                                self.format_metadata(message, idx, model, colors, !is_streaming);
                             lines.push(Line::from(metadata));
                             lines.push(Line::from(""));
                         }
@@ -5288,7 +5338,8 @@ impl Chat {
                                 )));
 
                     if show_metadata {
-                        let metadata = self.format_metadata(message, model, colors, !is_streaming);
+                        let metadata =
+                            self.format_metadata(message, idx, model, colors, !is_streaming);
                         lines.push(Line::from(metadata));
                         lines.push(Line::from(""));
                     }
@@ -5361,7 +5412,8 @@ impl Chat {
 
                 if !emitted_anything {
                     if is_streaming || (message.is_complete && message.was_interrupted) {
-                        let metadata = self.format_metadata(message, model, colors, !is_streaming);
+                        let metadata =
+                            self.format_metadata(message, idx, model, colors, !is_streaming);
                         lines.push(Line::from(metadata));
                         lines.push(Line::from(""));
                     }
@@ -5380,7 +5432,7 @@ impl Chat {
 
                 if show_metadata {
                     lines.push(Line::from(""));
-                    let metadata = self.format_metadata(message, model, colors, !is_streaming);
+                    let metadata = self.format_metadata(message, idx, model, colors, !is_streaming);
                     lines.push(Line::from(metadata));
                     lines.push(Line::from(""));
                 } else {
@@ -5494,6 +5546,26 @@ impl Chat {
     fn format_tool_row<'a>(
         &'a self,
         message: &'a Message,
+        max_width: usize,
+        colors: &'a ThemeColors,
+        attached: bool,
+    ) -> Vec<Line<'a>> {
+        let parsed = parse_tool_message(&message.content).unwrap_or_else(|| ParsedToolMessage {
+            name: "tool".to_string(),
+            status: "ok".to_string(),
+            args: None,
+            metadata: None,
+            output_preview: Some(message.content.clone()),
+            title: None,
+        });
+        self.format_parsed_tool_row(parsed, max_width, colors, attached)
+    }
+
+    // Ordered parts already contain decoded JSON. Keep formatting behind the
+    // same seam instead of cloning, serializing and parsing the entire output.
+    fn format_parsed_tool_row<'a>(
+        &'a self,
+        parsed: ParsedToolMessage,
         max_width: usize,
         colors: &'a ThemeColors,
         attached: bool,
@@ -5718,27 +5790,20 @@ impl Chat {
         let indent = "";
         let mut out: Vec<Line<'a>> = Vec::new();
 
-        let parsed = parse_tool_message(&message.content);
-        let (name, status, args, metadata, output_preview, title) =
-            if let Some(info) = parsed.as_ref() {
-                (
-                    info.name.clone(),
-                    info.status.clone(),
-                    info.args.clone(),
-                    info.metadata.clone(),
-                    info.output_preview.clone(),
-                    info.title.clone(),
-                )
-            } else {
-                (
-                    "tool".to_string(),
-                    "ok".to_string(),
-                    None,
-                    None,
-                    Some(message.content.clone()),
-                    None,
-                )
-            };
+        if let Some(item) = task_tool_item(&parsed) {
+            return self.format_task_group(&[item], max_width, colors);
+        }
+        if let Some(item) = exploration_tool_item(&parsed) {
+            return self.format_exploration_group(&[item], max_width, colors);
+        }
+        let ParsedToolMessage {
+            name,
+            status,
+            args,
+            metadata,
+            output_preview,
+            title,
+        } = parsed;
 
         let tool_label = match name.as_str() {
             "glob" => "Glob",
@@ -5759,14 +5824,6 @@ impl Chat {
         };
 
         let args_obj = args.as_ref().and_then(|v| v.as_object());
-        if let Some(item) = parsed.as_ref().and_then(task_tool_item) {
-            return self.format_task_group(&[item], max_width, colors);
-        }
-
-        if let Some(item) = parsed.as_ref().and_then(exploration_tool_item) {
-            return self.format_exploration_group(&[item], max_width, colors);
-        }
-
         if let Some(plan_update) = plan_update_display(&name, &args, &metadata, &output_preview) {
             let active = matches!(status.as_str(), "running" | "pending");
             let marker_style = Style::default()
@@ -6684,6 +6741,7 @@ impl Chat {
     fn format_metadata(
         &self,
         message: &Message,
+        message_idx: usize,
         model: &str,
         colors: &ThemeColors,
         include_metrics: bool,
@@ -6691,7 +6749,7 @@ impl Chat {
         let mut spans = Vec::new();
 
         // Get agent mode from previous user message or default to "Plan"
-        let agent_mode = self.get_agent_mode_for_message(message);
+        let agent_mode = self.get_agent_mode_for_message(message_idx);
         let agent_color = crate::theme::agent_color(&agent_mode, colors);
 
         // Agent icon (▣) with extra space
@@ -6795,19 +6853,13 @@ impl Chat {
         spans
     }
 
-    fn get_agent_mode_for_message(&self, message: &Message) -> String {
-        // Find the index of the current message by comparing content and timestamp
-        if let Some(current_idx) = self
-            .messages
-            .iter()
-            .position(|m| m.content == message.content && m.timestamp == message.timestamp)
-        {
-            // Look backwards for the preceding user message
-            for i in (0..current_idx).rev() {
-                if self.messages[i].role == MessageRole::User {
-                    if let Some(ref agent_mode) = self.messages[i].agent_mode {
-                        return agent_mode.clone();
-                    }
+    fn get_agent_mode_for_message(&self, message_idx: usize) -> String {
+        // The renderer already knows the index. Searching by content both
+        // scanned every preceding payload and confused identical messages.
+        for message in self.messages[..message_idx].iter().rev() {
+            if message.role == MessageRole::User {
+                if let Some(ref agent_mode) = message.agent_mode {
+                    return agent_mode.clone();
                 }
             }
         }
@@ -7880,6 +7932,150 @@ mod tests {
         assert_eq!(chat.cached_lines[0], sentinel);
         assert_eq!(chat.cached_positions[2], prefix_len);
         assert!(chat.cached_lines.len() > prefix_len);
+    }
+
+    #[test]
+    fn truncate_cache_matches_cold_at_every_boundary() {
+        let messages = vec![
+            Message::user("start https://example.com"),
+            Message::assistant("first answer"),
+            append_test_tool("read", "src/one.rs"),
+            append_test_tool("read", "src/two.rs"),
+            append_test_tool("task", "first task"),
+            append_test_tool("task", "second task"),
+            Message::assistant("last answer"),
+            Message::tool(serde_json::json!({
+                "name":"write", "status":"ok", "args":{"file_path":"src/test.rs", "content":"fn main() {}\n"}
+            }).to_string()),
+            crate::session::compaction::compaction_marker(crate::session::types::CompactionStats {
+                before_tokens: 1000, after_tokens: 100, before_messages: 8, after_messages: 2,
+            }),
+            Message::user(format!("{}\nhidden summary", crate::session::compaction::SUMMARY_PREFIX)),
+            Message::user("next turn"),
+        ];
+        for width in [18, 80] {
+            for len in 0..=messages.len() {
+                let mut chat = Chat::with_messages(messages.clone());
+                chat.ensure_render_cache(width, "model", &test_colors());
+                chat.truncate_messages(len);
+                assert_append_cache_matches_full(&mut chat, width);
+                let mut cold = Chat::with_messages(messages[..len].to_vec());
+                cold.ensure_render_cache(width, "model", &test_colors());
+                assert_eq!(chat.cached_lines, cold.cached_lines);
+                assert_eq!(chat.cached_positions, cold.cached_positions);
+                assert_eq!(chat.cached_editor_locations, cold.cached_editor_locations);
+                // Appending after undo must not resurrect discarded row caches.
+                chat.add_message(Message::assistant("replacement answer"));
+                assert_append_cache_matches_full(&mut chat, width);
+            }
+        }
+    }
+
+    #[test]
+    fn truncate_cache_preserves_prefix_and_pending_streaming_edits() {
+        let mut chat = Chat::with_messages(vec![
+            Message::user("stable prefix"),
+            Message::assistant("pending edit"),
+            Message::user("removed turn"),
+            Message::assistant("removed answer"),
+        ]);
+        chat.ensure_render_cache(80, "model", &test_colors());
+        chat.messages[1].append(" updated before invalidation");
+        chat.mark_streaming_render_pending(1, true);
+        chat.truncate_messages(3);
+        assert_eq!(chat.render_dirty_from, 1);
+        assert_append_cache_matches_full(&mut chat, 80);
+
+        let sentinel = Line::raw("untouched prefix\u{7}");
+        chat.cached_lines[0] = sentinel.clone();
+        chat.truncate_messages(2);
+        chat.ensure_render_cache(80, "model", &test_colors());
+        assert_eq!(chat.cached_lines[0], sentinel);
+    }
+
+    #[test]
+    fn decoded_tool_rows_match_legacy_json_roundtrip() {
+        let colors = test_colors();
+        let chat = Chat::new();
+        for name in ["bash", "write", "edit", "apply_patch", "webfetch", "custom"] {
+            for status in ["ok", "error", "running"] {
+                let payload = serde_json::json!({
+                    "id":"call_1", "name":name, "status":status,
+                    "args":{"command":"echo hello", "file_path":"src/test.rs", "content":"fn main() {}", "old_string":"old", "new_string":"new"},
+                    "metadata":{"exit_code":0}, "output_preview":"hello\nworld", "title":"Test"
+                });
+                let part = MessagePart::tool_result(payload.clone());
+                let message = Message::assistant("");
+                let legacy = Message::tool(
+                    assistant_tool_part_content(&message, &part, &Default::default()).unwrap(),
+                );
+                let parsed = parsed_tool_message_from_object(payload.as_object().unwrap(), true);
+                for width in [18, 80] {
+                    let actual = chat.format_parsed_tool_row(parsed.clone(), width, &colors, true);
+                    let expected = chat.format_tool_row(&legacy, width, &colors, true);
+                    assert_eq!(actual, expected, "{name}/{status}/{width}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "synthetic history render timings; run with --ignored --nocapture"]
+    fn benchmark_history_open_and_truncate() {
+        let mut messages = Vec::new();
+        let output = "synthetic tool output with https://example.com and `code`\n".repeat(1000);
+        for turn in 0..72 {
+            messages.push(Message::user(format!("Inspect turn {turn}")));
+            let mut assistant = Message::assistant("Finished inspecting.");
+            assistant.add_tool_call_part(
+                format!("call_{turn}"),
+                "bash",
+                serde_json::json!({"command":"echo synthetic"}),
+            );
+            assistant.add_or_update_tool_result_part(serde_json::json!({
+                "id":format!("call_{turn}"), "name":"bash", "status":"ok",
+                "args":{"command":"echo synthetic"}, "output_preview":output,
+            }));
+            messages.push(assistant);
+        }
+        let colors = test_colors();
+        let start = std::time::Instant::now();
+        let mut chat = Chat::with_messages(messages);
+        let hydrate = start.elapsed();
+        let start = std::time::Instant::now();
+        chat.ensure_render_cache(100, "model", &colors);
+        let cold = start.elapsed();
+        let lines = chat.cached_lines.len();
+        let start = std::time::Instant::now();
+        chat.ensure_render_cache(100, "model", &colors);
+        let warm = start.elapsed();
+        let start = std::time::Instant::now();
+        chat.truncate_messages(142);
+        chat.ensure_render_cache(100, "model", &colors);
+        let undo = start.elapsed();
+        assert_append_cache_matches_full(&mut chat, 100);
+        eprintln!("synthetic history: 144 rows, {} output bytes, {lines} rendered lines; hydrate={hydrate:?} cold={cold:?} warm={warm:?} undo={undo:?}", output.len() * 72);
+
+        let payload = serde_json::json!({"name":"bash", "status":"ok", "args":{"command":"echo synthetic"}, "output_preview":output});
+        let part = MessagePart::tool_result(payload.clone());
+        let message = Message::assistant("");
+        let start = std::time::Instant::now();
+        for _ in 0..72 {
+            let tool = Message::tool(
+                assistant_tool_part_content(&message, &part, &Default::default()).unwrap(),
+            );
+            std::hint::black_box(chat.format_tool_row(&tool, 100, &colors, true));
+        }
+        let legacy = start.elapsed();
+        let start = std::time::Instant::now();
+        for _ in 0..72 {
+            let parsed = parsed_tool_message_from_object(payload.as_object().unwrap(), true);
+            std::hint::black_box(chat.format_parsed_tool_row(parsed, 100, &colors, true));
+        }
+        eprintln!(
+            "72 tool rows: legacy JSON roundtrip={legacy:?}, decoded={:?}",
+            start.elapsed()
+        );
     }
 
     fn trimmed_line_text(line: &Line<'_>) -> String {

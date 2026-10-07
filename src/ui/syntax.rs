@@ -3,11 +3,11 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
 use std::path::Path;
 use std::sync::OnceLock;
-use syntect::easy::HighlightLines;
 use syntect::highlighting::{
-    Color as SyntectColor, FontStyle, Style as SyntectStyle, Theme, ThemeSet,
+    Color as SyntectColor, FontStyle, HighlightIterator, HighlightState, Highlighter,
+    Style as SyntectStyle, Theme, ThemeSet,
 };
-use syntect::parsing::{SyntaxReference, SyntaxSet};
+use syntect::parsing::{ParseState, ScopeStack, SyntaxReference, SyntaxSet};
 use syntect::util::LinesWithEndings;
 
 const MAX_HIGHLIGHT_BYTES: usize = 512 * 1024;
@@ -43,11 +43,25 @@ fn highlight_code(code: &str, lang: &str, colors: &ThemeColors) -> Option<Vec<Ve
 
     let syntax = find_syntax(lang)?;
     let theme = theme_for_colors(colors)?;
-    let mut highlighter = HighlightLines::new(syntax, theme);
+    let highlighter = Highlighter::new(theme);
+    let mut parse_state = ParseState::new(syntax);
+    let mut highlight_state = HighlightState::new(&highlighter, ScopeStack::new());
+    let mut blank_is_fixed_point = false;
     let mut lines = Vec::new();
 
     for line in LinesWithEndings::from(code) {
-        let ranges = highlighter.highlight_line(line, syntax_set()).ok()?;
+        // Sparse patch hunks can have thousands of empty placeholder lines.
+        // Do not run every grammar regex on each one once a newline leaves
+        // BOTH parser and highlighting state unchanged. Never skip the first
+        // newline: it may terminate a comment/string or change indentation.
+        let blank = line == "\n";
+        if blank && blank_is_fixed_point {
+            lines.push(vec![Span::raw("")]);
+            continue;
+        }
+        let before = blank.then(|| (parse_state.clone(), highlight_state.clone()));
+        let ops = parse_state.parse_line(line, syntax_set()).ok()?;
+        let ranges = HighlightIterator::new(&mut highlight_state, &ops, line, &highlighter);
         let mut spans = Vec::new();
         for (style, text) in ranges {
             let text = text.trim_end_matches(['\n', '\r']);
@@ -59,6 +73,9 @@ fn highlight_code(code: &str, lang: &str, colors: &ThemeColors) -> Option<Vec<Ve
         if spans.is_empty() {
             spans.push(Span::raw(""));
         }
+        blank_is_fixed_point = before.is_some_and(|(parser, highlight)| {
+            parser == parse_state && highlight == highlight_state
+        });
         lines.push(spans);
     }
 
@@ -139,5 +156,94 @@ fn convert_color(color: SyntectColor) -> Option<Color> {
         0x00 => Some(Color::Indexed(color.r)),
         0x01 => None,
         _ => Some(Color::Rgb(color.r, color.g, color.b)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use syntect::easy::HighlightLines;
+
+    fn reference_highlight(
+        code: &str,
+        lang: &str,
+        colors: &ThemeColors,
+    ) -> Vec<Vec<Span<'static>>> {
+        let mut highlighter = HighlightLines::new(
+            find_syntax(lang).unwrap(),
+            theme_for_colors(colors).unwrap(),
+        );
+        LinesWithEndings::from(code)
+            .map(|line| {
+                let mut spans = highlighter
+                    .highlight_line(line, syntax_set())
+                    .unwrap()
+                    .into_iter()
+                    .filter_map(|(style, text)| {
+                        let text = text.trim_end_matches(['\n', '\r']);
+                        (!text.is_empty())
+                            .then(|| Span::styled(text.to_owned(), convert_style(style)))
+                    })
+                    .collect::<Vec<_>>();
+                if spans.is_empty() {
+                    spans.push(Span::raw(""));
+                }
+                spans
+            })
+            .collect()
+    }
+
+    #[test]
+    fn sparse_highlighting_preserves_every_line_and_style() {
+        let mut colors = crate::theme::Theme::load_builtin_default().get_colors(true);
+        for background in [Color::Rgb(0, 0, 0), Color::Rgb(255, 255, 255)] {
+            colors.background = background;
+            for (lang, before, after) in [
+                ("rs", "/* multiline comment", "*/\nfn main() { let x = 1; }"),
+                ("rs", "// line comment", "fn main() {}"),
+                ("py", "x = \"\"\"multiline", "end\"\"\"\nprint(x)"),
+                (
+                    "py",
+                    "if True:\n    # comment",
+                    "    print('nested')\nprint('outer')",
+                ),
+                ("js", "const x = `template", "end`;\nconst y = /a+/;"),
+                (
+                    "html",
+                    "<script>/* comment",
+                    "*/ const x = 1;</script><p>done</p>",
+                ),
+                ("css", "p { /* comment", "*/ color: red; }"),
+                ("yaml", "value: |\n  scalar", "  continuation\nnext: true"),
+                ("sh", "cat <<'EOF'", "text\nEOF\necho done"),
+                ("md", "```rust\n/* comment", "*/\n```\n# heading"),
+                ("json", "{\"key\":", "true}"),
+                ("toml", "value = \"\"\"", "end\"\"\"\nother = true"),
+            ] {
+                for gap in [1, 2, 64] {
+                    let code = format!("\n\n{before}\n{}{after}\n\n", "\n".repeat(gap));
+                    assert_eq!(
+                        highlight_code(&code, lang, &colors).unwrap(),
+                        reference_highlight(&code, lang, &colors),
+                        "language={lang}, gap={gap}, background={background:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sparse_highlighting_preserves_long_gaps_and_line_endings() {
+        let colors = crate::theme::Theme::load_builtin_default().get_colors(true);
+        for ending in ["\n", "\r\n"] {
+            let code = format!(
+                "// comment{ending}{}fn main() {{}}{ending}{}/* unterminated",
+                ending.repeat(1_312),
+                ending.repeat(20)
+            );
+            let actual = highlight_code(&code, "rs", &colors).unwrap();
+            assert_eq!(actual.len(), code.lines().count());
+            assert_eq!(actual, reference_highlight(&code, "rs", &colors));
+        }
     }
 }
