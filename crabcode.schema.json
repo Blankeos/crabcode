@@ -82,24 +82,43 @@
       "anyOf": [
         {
           "type": "string",
-          "description": "Shell template run when a file path is clicked. Placeholders: {pathname}, {path}, {filename}, {pathname_raw}, {line}, {column}, {col}, {location}."
+          "description": "Shell template for the Open action on a file path. Placeholders: {pathname}, {path}, {filename}, {pathname_raw}, {line}, {column}, {col}, {location}."
         },
         {
           "additionalProperties": false,
           "properties": {
             "open": {
               "type": "string",
-              "description": "Shell template run when a file path is clicked. Placeholders: {pathname}, {path}, {filename}, {pathname_raw}, {line}, {column}, {col}, {location}."
+              "description": "Shell template for the Open action on a file path. Placeholders: {pathname}, {path}, {filename}, {pathname_raw}, {line}, {column}, {col}, {location}."
             },
             "suspend": {
               "type": "boolean",
               "default": false,
               "description": "Leave the TUI, run `open` in the terminal, then restore crabcode. Use this for Helix and Neovim without a multiplexer."
+            },
+            "text": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/EditorOpenerConfigFile"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional UTF-8 plain-text opener. Used after ordered filename overrides, before open or automatic detection. String shorthand defaults suspend to false; object suspend does not inherit editor.suspend. Bounded content heuristic excludes known binary/container signatures; unreadable and non-regular files fall back."
+            },
+            "overrides": {
+              "type": "object",
+              "description": "Case-insensitive basename globs in document order; the first match wins, before text and open. Each entry has its own suspend (default false).",
+              "additionalProperties": {
+                "$ref": "#/$defs/EditorOpenerConfigFile"
+              }
             }
           },
           "type": "object"
         }
-      ]
+      ],
+      "description": "Deprecated legacy editor configuration. Prefer fileActions.open. Legacy filename overrides always run before editor.text."
     },
     "ReasoningEffort": {
       "enum": [
@@ -356,6 +375,114 @@
         }
       },
       "type": "object"
+    },
+    "EditorOpenerConfigFile": {
+      "anyOf": [
+        {
+          "type": "string",
+          "minLength": 1
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "open"
+          ],
+          "properties": {
+            "open": {
+              "type": "string",
+              "minLength": 1
+            },
+            "suspend": {
+              "type": "boolean",
+              "default": false
+            }
+          }
+        }
+      ]
+    },
+    "FileActionOpenerConfigFile": {
+      "anyOf": [
+        {
+          "type": "string",
+          "minLength": 1
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["open"],
+          "properties": {
+            "open": {
+              "type": ["string", "null"],
+              "minLength": 1
+            },
+            "suspend": {
+              "type": ["boolean", "null"],
+              "default": false
+            }
+          }
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "File action opener. Null values delete inherited keys during source-layer merging."
+    },
+    "FileActionsConfigFile": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "open": {
+          "$ref": "#/$defs/FileActionOpenConfigFile"
+        }
+      },
+      "description": "Configure file actions. Without open, legacy editor remains active. Invalid fileActions/open/default/overrides structure warns and preserves legacy editor; invalid individual overrides warn and are skipped."
+    },
+    "FileActionOpenConfigFile": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "default": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FileActionOpenerConfigFile"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Default opener: command or {open, suspend}. Omitted/null selects the detected integrated editor or system application. system explicitly selects the OS default application."
+        },
+        "overrides": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "propertyNames": {
+            "anyOf": [
+              {
+                "const": "type:text"
+              },
+              {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^(?!type:).+"
+              }
+            ]
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/FileActionOpenerConfigFile"
+          },
+          "description": "Ordered case-insensitive basename globs or exact type:text content predicate (bounded UTF-8 plain-text heuristic). First match wins in written order, including type:text. Only type:text is supported; other type: keys warn and are skipped. Each opener suspend defaults independently to false."
+        }
+      },
+      "description": "Replaces legacy editor entirely when valid. Default is used only if no override matches; no fallback field. Layered objects merge deeply: existing rule positions stay fixed, new rules append, and null removes inherited keys."
     }
   },
   "$id": "https://raw.githubusercontent.com/blankeos/crabcode/main/crabcode.schema.json",
@@ -405,7 +532,9 @@
         {
           "type": "null"
         }
-      ]
+      ],
+      "deprecated": true,
+      "description": "Deprecated: use fileActions.open. Retained for compatibility; a valid fileActions.open replaces this entire configuration."
     },
     "mcp": true,
     "model": {
@@ -475,7 +604,10 @@
         }
       ]
     },
-    "watcher": true
+    "watcher": true,
+    "fileActions": {
+      "$ref": "#/$defs/FileActionsConfigFile"
+    }
   },
   "title": "CrabcodeConfigFile",
   "type": "object"

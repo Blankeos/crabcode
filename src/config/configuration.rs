@@ -328,22 +328,43 @@ pub struct EditorConfig {
     pub open: Option<String>,
     /// Leave the TUI, run `open` with the terminal, then restore crabcode.
     pub suspend: bool,
-    /// Basename-specific openers, in document order. The first match wins.
+    /// Content-detected UTF-8 text opener, after filename overrides and before `open`.
+    pub text: Option<EditorOpener>,
+    /// Ordered basename/content openers. The first match wins.
     pub overrides: Vec<EditorOverride>,
 }
 
 impl EditorConfig {
     /// Resolve an opener without interpreting reserved commands such as `system`.
     pub fn opener_for_path(&self, path: &Path) -> (Option<&str>, bool) {
-        if let Some(basename) = path.file_name() {
-            for entry in &self.overrides {
-                if entry.matcher.is_match(Path::new(basename)) {
-                    return (Some(entry.open.as_str()), entry.suspend);
-                }
+        let mut plain_text = None;
+        for entry in &self.overrides {
+            let matches = match &entry.matcher {
+                EditorMatcher::Glob(matcher) => path
+                    .file_name()
+                    .is_some_and(|basename| matcher.is_match(Path::new(basename))),
+                EditorMatcher::Text => *plain_text
+                    .get_or_insert_with(|| crate::utils::file_opener::is_plain_text_file(path)),
+            };
+            if matches {
+                return (Some(entry.open.as_str()), entry.suspend);
+            }
+        }
+        if let Some(text) = &self.text {
+            if *plain_text
+                .get_or_insert_with(|| crate::utils::file_opener::is_plain_text_file(path))
+            {
+                return (Some(text.open.as_str()), text.suspend);
             }
         }
         (self.open.as_deref(), self.suspend)
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EditorOpener {
+    pub open: String,
+    pub suspend: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -351,7 +372,13 @@ pub struct EditorOverride {
     pub pattern: String,
     pub open: String,
     pub suspend: bool,
-    matcher: GlobMatcher,
+    matcher: EditorMatcher,
+}
+
+#[derive(Debug, Clone)]
+enum EditorMatcher {
+    Glob(GlobMatcher),
+    Text,
 }
 
 impl PartialEq for EditorOverride {
@@ -1181,6 +1208,7 @@ fn crabcode_allowed_keys() -> BTreeSet<&'static str> {
     out.insert("theme");
     out.insert("notifications");
     out.insert("editor");
+    out.insert("fileActions");
     out.insert("websearch");
     out.insert("tui");
     out
@@ -1216,7 +1244,8 @@ fn deep_merge_with_provenance(
             for (k, overlay_v) in overlay_map {
                 let child_ptr = format!("{}/{}", pointer, escape_json_pointer(k));
                 if overlay_v.is_null() {
-                    base_map.remove(k);
+                    // Preserve written priority when deleting an inherited ordered rule.
+                    base_map.shift_remove(k);
                     remove_provenance_subtree(provenance, &child_ptr);
                     continue;
                 }
@@ -1231,7 +1260,7 @@ fn deep_merge_with_provenance(
                                 provenance,
                             );
                         } else {
-                            *base_v = overlay_v.clone();
+                            *base_v = normalized_merge_subtree(overlay_v);
                             set_provenance_for_subtree(
                                 base_v,
                                 &child_ptr,
@@ -1241,7 +1270,7 @@ fn deep_merge_with_provenance(
                         }
                     }
                     None => {
-                        base_map.insert(k.clone(), overlay_v.clone());
+                        base_map.insert(k.clone(), normalized_merge_subtree(overlay_v));
                         if let Some(v) = base_map.get(k) {
                             set_provenance_for_subtree(v, &child_ptr, overlay_base_dir, provenance);
                         }
@@ -1255,9 +1284,23 @@ fn deep_merge_with_provenance(
                 remove_provenance_subtree(provenance, &pointer);
                 return;
             }
-            *base_slot = overlay_v.clone();
+            *base_slot = normalized_merge_subtree(overlay_v);
             set_provenance_for_subtree(base_slot, &pointer, overlay_base_dir, provenance);
         }
+    }
+}
+
+/// Object nulls are deletion markers even when no inherited object exists.
+/// Arrays replace atomically, so their contents (including nulls) stay literal.
+fn normalized_merge_subtree(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .filter(|(_, value)| !value.is_null())
+                .map(|(key, value)| (key.clone(), normalized_merge_subtree(value)))
+                .collect(),
+        ),
+        _ => value.clone(),
     }
 }
 
@@ -1489,7 +1532,8 @@ fn parse_merged_config(merged: &Value, diagnostics: &mut ConfigDiagnostics) -> M
     let mut notifications = NotificationsConfig::default();
     apply_notifications(obj.get("notifications"), &mut notifications, diagnostics);
     out.notifications = notifications;
-    out.editor = parse_editor(obj.get("editor"), diagnostics);
+    out.editor = parse_file_actions(obj.get("fileActions"), diagnostics)
+        .unwrap_or_else(|| parse_editor(obj.get("editor"), diagnostics));
     out.websearch = parse_websearch(obj.get("websearch"), diagnostics);
     out.mcp = parse_mcp(obj.get("mcp"), diagnostics);
     out.instructions = obj
@@ -2351,6 +2395,88 @@ fn parse_custom_providers(
     out
 }
 
+/// A structurally invalid fileActions/open/default/overrides preserves legacy editor.
+/// A valid open object replaces editor entirely, even with omitted/null default.
+/// Invalid individual rules warn and are skipped; unknown fields warn and are ignored.
+/// Source-layer null deletion markers are removed by merging before this parser runs.
+fn parse_file_actions(
+    value: Option<&Value>,
+    diagnostics: &mut ConfigDiagnostics,
+) -> Option<EditorConfig> {
+    let value = value?;
+    let Some(actions) = value.as_object() else {
+        diagnostics
+            .warnings
+            .push("fileActions must be an object; preserving legacy editor".into());
+        return None;
+    };
+    for key in actions.keys().filter(|key| key.as_str() != "open") {
+        diagnostics
+            .warnings
+            .push(format!("fileActions.{key} is unknown and ignored"));
+    }
+    let value = actions.get("open")?;
+    let Some(open) = value.as_object() else {
+        diagnostics
+            .warnings
+            .push("fileActions.open must be an object; preserving legacy editor".into());
+        return None;
+    };
+    for key in open
+        .keys()
+        .filter(|key| !matches!(key.as_str(), "default" | "overrides"))
+    {
+        diagnostics
+            .warnings
+            .push(format!("fileActions.open.{key} is unknown and ignored"));
+    }
+    let mut editor = EditorConfig::default();
+    if let Some(default) = open.get("default").filter(|value| !value.is_null()) {
+        let Some(opener) = parse_editor_opener(default, "fileActions.open.default", diagnostics)
+        else {
+            diagnostics
+                .warnings
+                .push("invalid fileActions.open.default; preserving legacy editor".into());
+            return None;
+        };
+        editor.open = Some(opener.open);
+        editor.suspend = opener.suspend;
+    }
+    if let Some(overrides) = open.get("overrides") {
+        let Some(overrides) = overrides.as_object() else {
+            diagnostics.warnings.push(
+                "fileActions.open.overrides must be an object; preserving legacy editor".into(),
+            );
+            return None;
+        };
+        for (pattern, value) in overrides {
+            let key = format!("fileActions.open.overrides[{pattern:?}]");
+            let matcher = if pattern == "type:text" {
+                EditorMatcher::Text
+            } else if pattern.starts_with("type:") {
+                diagnostics.warnings.push(format!(
+                    "{key}: unknown content type; only type:text is supported"
+                ));
+                continue;
+            } else {
+                let Some(matcher) = parse_editor_glob(pattern, &key, diagnostics) else {
+                    continue;
+                };
+                EditorMatcher::Glob(matcher)
+            };
+            if let Some(opener) = parse_editor_opener(value, &key, diagnostics) {
+                editor.overrides.push(EditorOverride {
+                    pattern: pattern.clone(),
+                    open: opener.open,
+                    suspend: opener.suspend,
+                    matcher,
+                });
+            }
+        }
+    }
+    Some(editor)
+}
+
 fn parse_editor(value: Option<&Value>, diagnostics: &mut ConfigDiagnostics) -> EditorConfig {
     let mut editor = EditorConfig::default();
     let Some(value) = value else {
@@ -2375,6 +2501,9 @@ fn parse_editor(value: Option<&Value>, diagnostics: &mut ConfigDiagnostics) -> E
                         .warnings
                         .push("editor.suspend must be a boolean".to_string()),
                 }
+            }
+            if let Some(text) = map.get("text").filter(|value| !value.is_null()) {
+                editor.text = parse_editor_opener(text, "editor.text", diagnostics);
             }
             if let Some(overrides) = map.get("overrides") {
                 if let Value::Object(overrides) = overrides {
@@ -2420,6 +2549,21 @@ fn parse_editor_override(
     diagnostics: &mut ConfigDiagnostics,
 ) -> Option<EditorOverride> {
     let key = format!("editor.overrides[{pattern:?}]");
+    let matcher = parse_editor_glob(pattern, &key, diagnostics)?;
+    let opener = parse_editor_opener(value, &key, diagnostics)?;
+    Some(EditorOverride {
+        pattern: pattern.to_string(),
+        open: opener.open,
+        suspend: opener.suspend,
+        matcher: EditorMatcher::Glob(matcher),
+    })
+}
+
+fn parse_editor_glob(
+    pattern: &str,
+    key: &str,
+    diagnostics: &mut ConfigDiagnostics,
+) -> Option<GlobMatcher> {
     if pattern.trim().is_empty() {
         diagnostics
             .warnings
@@ -2435,9 +2579,25 @@ fn parse_editor_override(
             return None;
         }
     };
+    Some(glob.compile_matcher())
+}
+
+fn parse_editor_opener(
+    value: &Value,
+    key: &str,
+    diagnostics: &mut ConfigDiagnostics,
+) -> Option<EditorOpener> {
     let (open, suspend) = match value {
-        Value::String(_) => (parse_editor_command(value, &key, diagnostics)?, false),
+        Value::String(_) => (parse_editor_command(value, key, diagnostics)?, false),
         Value::Object(map) => {
+            for field in map
+                .keys()
+                .filter(|field| !matches!(field.as_str(), "open" | "suspend"))
+            {
+                diagnostics
+                    .warnings
+                    .push(format!("{key}.{field} is unknown and ignored"));
+            }
             let open = parse_editor_command(
                 map.get("open").unwrap_or(&Value::Null),
                 &format!("{key}.open"),
@@ -2462,12 +2622,7 @@ fn parse_editor_override(
             return None;
         }
     };
-    Some(EditorOverride {
-        pattern: pattern.to_string(),
-        open,
-        suspend,
-        matcher: glob.compile_matcher(),
-    })
+    Some(EditorOpener { open, suspend })
 }
 
 fn apply_notifications(
@@ -2786,6 +2941,7 @@ fn collect_unimplemented_keys(merged: &Value) -> Vec<String> {
         "enabledProviders",
         "notifications",
         "editor",
+        "fileActions",
         "websearch",
         "tui",
         "instructions",
@@ -3369,6 +3525,597 @@ mod tests {
         let mut diagnostics = ConfigDiagnostics::default();
         let config = parse_merged_config(&value, &mut diagnostics);
         (config.editor, diagnostics)
+    }
+
+    #[test]
+    fn editor_documentation_recipes_parse_without_warnings() {
+        for (name, document) in [(
+            "config/file-actions",
+            include_str!("../../_docs/config/file-actions.mdx"),
+        )] {
+            let mut recipes = 0;
+            for block in document.split("```jsonc").skip(1) {
+                let (_, body) = block.split_once('\n').unwrap();
+                let recipe = body.split_once("```").unwrap().0;
+                let (editor, diagnostics) = editor_from_document(recipe);
+                let value: Value = json5::from_str(recipe).unwrap();
+                if let Some(open) = value
+                    .get("fileActions")
+                    .and_then(|actions| actions.get("open"))
+                {
+                    assert_eq!(
+                        editor.text, None,
+                        "canonical recipes must not use legacy text"
+                    );
+                    if let Some(default) = open.get("default").filter(|value| !value.is_null()) {
+                        let expected = default
+                            .as_str()
+                            .or_else(|| default.get("open").and_then(Value::as_str));
+                        assert_eq!(editor.open.as_deref(), expected, "{name} recipe {recipes}");
+                        assert!(expected.is_some(), "invalid documented default");
+                    } else {
+                        assert_eq!(editor.open, None);
+                    }
+                    let rules = open.get("overrides").and_then(Value::as_object);
+                    assert_eq!(
+                        editor.overrides.len(),
+                        rules.map_or(0, |rules| rules.len()),
+                        "{name} recipe {recipes}: all rules must parse"
+                    );
+                    if let Some(rules) = rules {
+                        for (entry, (pattern, opener)) in editor.overrides.iter().zip(rules) {
+                            assert_eq!(&entry.pattern, pattern);
+                            assert_eq!(
+                                Some(entry.open.as_str()),
+                                opener
+                                    .as_str()
+                                    .or_else(|| opener.get("open").and_then(Value::as_str))
+                            );
+                            assert_eq!(
+                                entry.suspend,
+                                opener
+                                    .get("suspend")
+                                    .and_then(Value::as_bool)
+                                    .unwrap_or(false)
+                            );
+                            assert_eq!(
+                                matches!(entry.matcher, EditorMatcher::Text),
+                                pattern == "type:text"
+                            );
+                        }
+                    }
+                }
+                assert!(
+                    diagnostics.warnings.is_empty(),
+                    "{name} recipe {recipes}: {:?}",
+                    diagnostics.warnings
+                );
+                recipes += 1;
+            }
+            assert!(recipes > 0, "no recipes in {name}");
+        }
+    }
+
+    #[test]
+    fn file_actions_defaults_and_legacy_precedence() {
+        for (open, expected, suspend) in [
+            ("{}", None, false),
+            ("{default: null}", None, false),
+            ("{default: 'system'}", Some("system"), false),
+            (
+                "{default: {open: 'nvim {pathname}', suspend: true}}",
+                Some("nvim {pathname}"),
+                true,
+            ),
+        ] {
+            let (editor, diagnostics) = editor_from_document(&format!(
+                "{{editor: {{open: 'legacy', text: 'legacy-text', overrides: {{'*': 'legacy-rule'}}}}, fileActions: {{open: {open}}}}}"
+            ));
+            assert!(diagnostics.warnings.is_empty());
+            assert_eq!(
+                editor.opener_for_path(Path::new("missing")),
+                (expected, suspend)
+            );
+            assert!(editor.text.is_none());
+            assert!(editor.overrides.is_empty());
+        }
+        let (editor, diagnostics) = editor_from_document("{editor: 'legacy', fileActions: {}}");
+        assert_eq!(editor.open.as_deref(), Some("legacy"));
+        assert!(diagnostics.warnings.is_empty());
+        let (editor, diagnostics) =
+            editor_from_document("{editor: false, fileActions: {open: {default: 'system'}}}");
+        assert_eq!(editor.open.as_deref(), Some("system"));
+        assert!(
+            diagnostics.warnings.is_empty(),
+            "replaced editor is not parsed"
+        );
+    }
+
+    #[test]
+    fn file_actions_content_rules_follow_written_priority() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("Drawing.SVG");
+        fs::write(&path, "<svg>UTF-8 🦀</svg>").unwrap();
+        for (rules, expected) in [
+            (
+                "{'*.svg': 'system', 'type:text': {open: 'text', suspend: true}}",
+                (Some("system"), false),
+            ),
+            (
+                "{'type:text': {open: 'text', suspend: true}, '*.svg': 'system'}",
+                (Some("text"), true),
+            ),
+        ] {
+            let (editor, diagnostics) = editor_from_document(&format!(
+                "{{fileActions: {{open: {{default: 'default', overrides: {rules}}}}}}}"
+            ));
+            assert!(diagnostics.warnings.is_empty());
+            assert_eq!(editor.opener_for_path(&path), expected);
+            assert_eq!(
+                editor.opener_for_path(&root.path().join("missing")),
+                (Some("default"), false)
+            );
+            assert_eq!(
+                editor.opener_for_path(root.path()),
+                (Some("default"), false)
+            );
+        }
+        let (editor, _) =
+            editor_from_document("{fileActions: {open: {overrides: {'type:text': 'text'}}}}");
+        assert_eq!(editor.opener_for_path(&path), (Some("text"), false));
+        fs::write(&path, [0, 255]).unwrap();
+        assert_eq!(editor.opener_for_path(&path), (None, false));
+        // A dangling symlink cannot be opened/read, so classification falls back.
+        #[cfg(unix)]
+        {
+            let unreadable = root.path().join("unreadable");
+            std::os::unix::fs::symlink(root.path().join("absent"), &unreadable).unwrap();
+            assert_eq!(editor.opener_for_path(&unreadable), (None, false));
+        }
+    }
+
+    #[test]
+    fn file_actions_invalid_structure_preserves_legacy_and_warns() {
+        for actions in [
+            "null",
+            "false",
+            "[]",
+            "'system'",
+            "{open: null}",
+            "{open: false}",
+            "{open: []}",
+            "{open: 'system'}",
+            "{open: {default: false}}",
+            "{open: {default: ''}}",
+            "{open: {default: {}}}",
+            "{open: {default: {open: 'x', suspend: 'yes'}}}",
+            "{open: {overrides: null}}",
+            "{open: {overrides: []}}",
+        ] {
+            let (editor, diagnostics) =
+                editor_from_document(&format!("{{editor: 'legacy', fileActions: {actions}}}"));
+            assert_eq!(editor.open.as_deref(), Some("legacy"), "{actions}");
+            assert!(!diagnostics.warnings.is_empty(), "{actions}");
+            assert!(diagnostics
+                .warnings
+                .iter()
+                .all(|warning| warning.contains("fileActions")));
+        }
+        let (editor, diagnostics) =
+            editor_from_document("{fileActions: {open: {fallback: 'not-supported'}}}");
+        assert_eq!(editor, EditorConfig::default());
+        assert!(diagnostics
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("fallback")));
+    }
+
+    #[test]
+    fn file_actions_unknown_types_and_invalid_rules_are_skipped() {
+        let (editor, diagnostics) = editor_from_document("{fileActions: {open: {default: 'default', overrides: {'type:binary': 'wrong', 'type:TEXT': 'wrong', '[': 'bad-glob', '*.svg': false, 'type:text': null, '*.rs': {open: 'rust', suspend: true}}}}}");
+        assert_eq!(editor.overrides.len(), 1);
+        assert_eq!(diagnostics.warnings.len(), 5);
+        assert_eq!(
+            editor.opener_for_path(Path::new("type:binary")),
+            (Some("default"), false)
+        );
+        assert_eq!(
+            editor.opener_for_path(Path::new("FILE.RS")),
+            (Some("rust"), true)
+        );
+        let (legacy, diagnostics) =
+            editor_from_document("{editor: {overrides: {'type:text': 'literal'}}}");
+        assert!(diagnostics.warnings.is_empty());
+        assert!(matches!(
+            legacy.overrides[0].matcher,
+            EditorMatcher::Glob(_)
+        ));
+        assert_eq!(
+            legacy.opener_for_path(Path::new("type:text")),
+            (Some("literal"), false)
+        );
+    }
+
+    #[test]
+    fn file_actions_layer_merging_preserves_priority_and_null_deletes() {
+        let mut base: Value = json5::from_str("{editor: 'legacy', fileActions: {open: {default: {open: 'main', suspend: true}, overrides: {'Z*': 'first', '*.svg': 'svg', 'type:text': 'text', '*': 'last'}}}}").unwrap();
+        let overlay: Value = json5::from_str("{fileActions: {open: {default: {open: 'new'}, overrides: {'Z*': null, '*.svg': 'new-svg', '*.png': 'png'}}}}").unwrap();
+        deep_merge_with_provenance(
+            &mut base,
+            &overlay,
+            String::new(),
+            Path::new("."),
+            &mut HashMap::new(),
+        );
+        let mut diagnostics = ConfigDiagnostics::default();
+        let config = parse_merged_config(&base, &mut diagnostics);
+        assert!(diagnostics.warnings.is_empty());
+        assert_eq!(config.editor.open.as_deref(), Some("new"));
+        assert!(config.editor.suspend);
+        assert_eq!(
+            config
+                .editor
+                .overrides
+                .iter()
+                .map(|rule| rule.pattern.as_str())
+                .collect::<Vec<_>>(),
+            ["*.svg", "type:text", "*", "*.png"]
+        );
+        assert_eq!(
+            config.editor.opener_for_path(Path::new("Z.SVG")),
+            (Some("new-svg"), false)
+        );
+        let overlay =
+            json!({"fileActions": {"open": {"default": null, "overrides": {"type:text": null}}}});
+        deep_merge_with_provenance(
+            &mut base,
+            &overlay,
+            String::new(),
+            Path::new("."),
+            &mut HashMap::new(),
+        );
+        let config = parse_merged_config(&base, &mut diagnostics);
+        assert_eq!(config.editor.open, None);
+        assert!(!config.editor.suspend);
+        assert_eq!(
+            config
+                .editor
+                .overrides
+                .iter()
+                .map(|rule| rule.pattern.as_str())
+                .collect::<Vec<_>>(),
+            ["*.svg", "*", "*.png"]
+        );
+        deep_merge_with_provenance(
+            &mut base,
+            &json!({"fileActions": {"open": null}}),
+            String::new(),
+            Path::new("."),
+            &mut HashMap::new(),
+        );
+        assert_eq!(
+            parse_merged_config(&base, &mut diagnostics)
+                .editor
+                .open
+                .as_deref(),
+            Some("legacy")
+        );
+    }
+
+    #[test]
+    fn file_actions_new_subtrees_normalize_null_deletions() {
+        for inherited in [
+            "{}",
+            "{fileActions: {}}",
+            "{fileActions: {open: {}}}",
+            "{fileActions: {open: {overrides: {'*': 'inherited'}}}}",
+            "{fileActions: false}",
+            "{fileActions: {open: false}}",
+        ] {
+            let mut base: Value = json5::from_str(inherited).unwrap();
+            base["editor"] = json!("legacy");
+            let overlay = json!({"fileActions": {"open": {"overrides": null}}});
+            deep_merge_with_provenance(
+                &mut base,
+                &overlay,
+                String::new(),
+                Path::new("project"),
+                &mut HashMap::new(),
+            );
+            assert_eq!(base["fileActions"]["open"], json!({}), "{inherited}");
+            let mut diagnostics = ConfigDiagnostics::default();
+            let config = parse_merged_config(&base, &mut diagnostics);
+            assert_eq!(config.editor, EditorConfig::default(), "{inherited}");
+            assert!(diagnostics.warnings.is_empty(), "{inherited}");
+        }
+
+        for inherited in ["{}", "{fileActions: {open: {overrides: false}}}"] {
+            let mut base: Value = json5::from_str(inherited).unwrap();
+            let overlay: Value = json5::from_str("{fileActions: {open: {default: null, overrides: {'Z*': 'first', '*.svg': null, 'type:text': {open: 'text', suspend: null}, '*': 'last'}}}}").unwrap();
+            deep_merge_with_provenance(
+                &mut base,
+                &overlay,
+                String::new(),
+                Path::new("project"),
+                &mut HashMap::new(),
+            );
+            let mut diagnostics = ConfigDiagnostics::default();
+            let config = parse_merged_config(&base, &mut diagnostics);
+            assert!(diagnostics.warnings.is_empty());
+            assert_eq!(config.editor.open, None);
+            assert_eq!(
+                config
+                    .editor
+                    .overrides
+                    .iter()
+                    .map(|rule| rule.pattern.as_str())
+                    .collect::<Vec<_>>(),
+                ["Z*", "type:text", "*"]
+            );
+            assert!(!config.editor.overrides[1].suspend);
+        }
+    }
+
+    #[test]
+    fn file_actions_source_deletions_and_invalid_structure_have_distinct_fallbacks() {
+        for (overlay, expected, warns) in [
+            ("{fileActions: null}", Some("legacy"), false),
+            ("{fileActions: {open: null}}", Some("legacy"), false),
+            (
+                "{fileActions: {open: {default: null, overrides: null}}}",
+                None,
+                false,
+            ),
+            ("{fileActions: false}", Some("legacy"), true),
+            ("{fileActions: {open: false}}", Some("legacy"), true),
+            (
+                "{fileActions: {open: {default: false}}}",
+                Some("legacy"),
+                true,
+            ),
+            (
+                "{fileActions: {open: {overrides: []}}}",
+                Some("legacy"),
+                true,
+            ),
+        ] {
+            let mut base = json!({"editor": "legacy", "fileActions": {"open": {"default": "canonical", "overrides": {"*": "inherited"}}}});
+            let overlay: Value = json5::from_str(overlay).unwrap();
+            deep_merge_with_provenance(
+                &mut base,
+                &overlay,
+                String::new(),
+                Path::new("project"),
+                &mut HashMap::new(),
+            );
+            let mut diagnostics = ConfigDiagnostics::default();
+            let config = parse_merged_config(&base, &mut diagnostics);
+            assert_eq!(config.editor.open.as_deref(), expected, "{overlay}");
+            assert_eq!(!diagnostics.warnings.is_empty(), warns, "{overlay}");
+        }
+    }
+
+    #[test]
+    fn merge_replacements_normalize_objects_and_reset_provenance() {
+        for initial in [json!(false), json!({}), json!({"subtree": "old"})] {
+            let mut base = initial;
+            let mut provenance = HashMap::from([
+                ("/subtree".into(), PathBuf::from("global")),
+                ("/subtree/gone/child".into(), PathBuf::from("global")),
+            ]);
+            let overlay = json!({"subtree": {"gone": null, "nested": {"gone": null, "keep": "value"}, "array": [null, {"literal": null}]}});
+            deep_merge_with_provenance(
+                &mut base,
+                &overlay,
+                String::new(),
+                Path::new("project"),
+                &mut provenance,
+            );
+            assert_eq!(
+                base,
+                json!({"subtree": {"nested": {"keep": "value"}, "array": [null, {"literal": null}]}})
+            );
+            assert!(!provenance.contains_key("/subtree/gone/child"));
+            assert_eq!(
+                find_base_dir_for_pointer(&provenance, "/subtree/nested/keep"),
+                PathBuf::from("project")
+            );
+            deep_merge_with_provenance(
+                &mut base,
+                &json!({"subtree": 42}),
+                String::new(),
+                Path::new("next"),
+                &mut provenance,
+            );
+            assert_eq!(base, json!({"subtree": 42}));
+            assert_eq!(provenance.get("/subtree"), Some(&PathBuf::from("next")));
+            assert!(!provenance.keys().any(|key| key.starts_with("/subtree/")));
+            deep_merge_with_provenance(
+                &mut base,
+                &json!({"subtree": null}),
+                String::new(),
+                Path::new("next"),
+                &mut provenance,
+            );
+            assert_eq!(base, json!({}));
+            assert!(!provenance.contains_key("/subtree"));
+        }
+    }
+
+    #[test]
+    fn file_actions_opener_unknown_fields_warn_with_full_paths() {
+        let (editor, diagnostics) = editor_from_document("{fileActions: {open: {default: {open: 'main', suspen: true}, overrides: {'*.rs': {open: 'rust', suspen: true}}}}}");
+        assert_eq!(editor.open.as_deref(), Some("main"));
+        assert!(!editor.suspend);
+        assert_eq!(editor.overrides.len(), 1);
+        assert!(!editor.overrides[0].suspend);
+        assert_eq!(
+            diagnostics.warnings,
+            [
+                "fileActions.open.default.suspen is unknown and ignored",
+                "fileActions.open.overrides[\"*.rs\"].suspen is unknown and ignored",
+            ]
+        );
+    }
+
+    #[test]
+    fn file_actions_surface_and_schema_expose_canonical_shape() {
+        let value = json!({"fileActions": {"open": {"default": "system", "overrides": {"*.svg": "system", "type:text": "my-editor {pathname}"}}}});
+        assert_eq!(filter_top_level(value.clone(), SourceKind::Crabcode), value);
+        assert!(collect_unimplemented_keys(&value).is_empty());
+        let mut diagnostics = ConfigDiagnostics::default();
+        let editor = parse_merged_config(&value, &mut diagnostics).editor;
+        assert_eq!(editor.open.as_deref(), Some("system"));
+        assert_eq!(editor.overrides.len(), 2);
+        assert!(diagnostics.warnings.is_empty());
+        let schema: Value =
+            serde_json::from_str(include_str!("../../crabcode.schema.json")).unwrap();
+        assert_eq!(
+            schema["properties"]["fileActions"]["$ref"],
+            "#/$defs/FileActionsConfigFile"
+        );
+        assert_eq!(
+            schema["$defs"]["FileActionsConfigFile"]["properties"]["open"]["$ref"],
+            "#/$defs/FileActionOpenConfigFile"
+        );
+        let props = &schema["$defs"]["FileActionOpenConfigFile"]["properties"];
+        assert!(props.get("fallback").is_none());
+        assert_eq!(
+            props["default"]["anyOf"][0]["$ref"],
+            "#/$defs/FileActionOpenerConfigFile"
+        );
+        assert_eq!(props["default"]["anyOf"][1]["type"], "null");
+        assert_eq!(
+            props["overrides"]["additionalProperties"]["$ref"],
+            "#/$defs/FileActionOpenerConfigFile"
+        );
+        let names = &props["overrides"]["propertyNames"]["anyOf"];
+        assert_eq!(names[0]["const"], "type:text");
+        // JSON Schema supports lookahead; this guard excludes all other type: keys.
+        assert_eq!(names[1]["pattern"], "^(?!type:).+");
+        for definition in ["FileActionsConfigFile", "FileActionOpenConfigFile"] {
+            assert_eq!(
+                schema["$defs"][definition]["type"],
+                json!(["object", "null"])
+            );
+        }
+        assert_eq!(props["overrides"]["type"], json!(["object", "null"]));
+        let opener = &schema["$defs"]["FileActionOpenerConfigFile"]["anyOf"];
+        assert_eq!(opener[0]["type"], "string");
+        assert_eq!(opener[1]["type"], "object");
+        assert_eq!(opener[1]["additionalProperties"], false);
+        assert_eq!(
+            opener[1]["properties"]["open"]["type"],
+            json!(["string", "null"])
+        );
+        assert_eq!(
+            opener[1]["properties"]["suspend"]["type"],
+            json!(["boolean", "null"])
+        );
+        assert_eq!(opener[2]["type"], "null");
+        // Canonical deletion support must not loosen the legacy opener schema.
+        let legacy = &schema["$defs"]["EditorOpenerConfigFile"]["anyOf"];
+        assert_eq!(legacy.as_array().unwrap().len(), 2);
+        assert_eq!(legacy[1]["properties"]["open"]["type"], "string");
+        assert_eq!(legacy[1]["properties"]["suspend"]["type"], "boolean");
+        assert_eq!(schema["properties"]["editor"]["deprecated"], true);
+    }
+
+    #[test]
+    fn editor_text_opener_parses_shorthand_object_and_null() {
+        for (text, expected) in [
+            (
+                "'nvim +{line} -- {pathname}'",
+                Some(EditorOpener {
+                    open: "nvim +{line} -- {pathname}".into(),
+                    suspend: false,
+                }),
+            ),
+            (
+                "{open: 'nvim', suspend: true}",
+                Some(EditorOpener {
+                    open: "nvim".into(),
+                    suspend: true,
+                }),
+            ),
+            (
+                "{open: 'system'}",
+                Some(EditorOpener {
+                    open: "system".into(),
+                    suspend: false,
+                }),
+            ),
+            ("null", None),
+        ] {
+            let (editor, diagnostics) = editor_from_document(&format!(
+                "{{editor: {{open: 'system', suspend: true, text: {text}}}}}"
+            ));
+            assert_eq!(editor.text, expected);
+            assert_eq!(editor.open.as_deref(), Some("system"));
+            assert!(editor.suspend);
+            assert!(diagnostics.warnings.is_empty());
+        }
+        for text in [
+            "false",
+            "[]",
+            "42",
+            "''",
+            "'   '",
+            "{}",
+            "{open: 3}",
+            "{open: 'nvim', suspend: 'yes'}",
+        ] {
+            let (editor, diagnostics) =
+                editor_from_document(&format!("{{editor: {{open: 'fallback', text: {text}}}}}"));
+            assert!(editor.text.is_none(), "{text}");
+            assert_eq!(editor.open.as_deref(), Some("fallback"));
+            assert!(
+                diagnostics
+                    .warnings
+                    .iter()
+                    .any(|warning| warning.contains("editor.text")),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn editor_overrides_win_before_content_detection_and_text_ignores_main_suspend() {
+        let (editor, diagnostics) = editor_from_document("{editor: {open: 'fallback', suspend: true, text: 'text-editor', overrides: {'Z*': {open: 'first', suspend: true}, '*': 'second'}}}");
+        assert!(diagnostics.warnings.is_empty());
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("zebra");
+        std::fs::write(&path, "unicode 🦀").unwrap();
+        assert_eq!(editor.opener_for_path(&path), (Some("first"), true));
+        assert_eq!(
+            editor.opener_for_path(&root.path().join("missing")),
+            (Some("second"), false)
+        );
+        let (editor, _) = editor_from_document(
+            "{editor: {open: 'fallback', suspend: true, text: 'text-editor'}}",
+        );
+        assert_eq!(editor.opener_for_path(&path), (Some("text-editor"), false));
+        std::fs::write(&path, b"\0").unwrap();
+        assert_eq!(editor.opener_for_path(&path), (Some("fallback"), true));
+    }
+
+    #[test]
+    fn editor_schema_exposes_text_and_ordered_overrides() {
+        let schema: Value =
+            serde_json::from_str(include_str!("../../crabcode.schema.json")).unwrap();
+        let props = &schema["$defs"]["EditorConfigFile"]["anyOf"][1]["properties"];
+        assert_eq!(
+            props["text"]["anyOf"][0]["$ref"],
+            "#/$defs/EditorOpenerConfigFile"
+        );
+        assert_eq!(
+            props["overrides"]["additionalProperties"]["$ref"],
+            "#/$defs/EditorOpenerConfigFile"
+        );
+        let opener = &schema["$defs"]["EditorOpenerConfigFile"]["anyOf"];
+        assert_eq!(opener[0]["type"], "string");
+        assert_eq!(opener[1]["required"], serde_json::json!(["open"]));
+        assert_eq!(opener[1]["properties"]["suspend"]["default"], false);
     }
 
     #[test]

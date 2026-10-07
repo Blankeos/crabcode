@@ -564,12 +564,9 @@ fn expand_local_path(path_text: &str) -> Option<PathBuf> {
         return dirs::home_dir().map(|home| home.join(rest));
     }
 
-    let path = PathBuf::from(path_text);
-    if path.is_absolute() {
-        Some(path)
-    } else {
-        std::env::current_dir().ok().map(|cwd| cwd.join(path))
-    }
+    // Relative links belong to the active workspace, which is only known by
+    // the app at action time (and may differ from the process cwd).
+    Some(PathBuf::from(path_text))
 }
 
 fn is_local_path_like(path_text: &str) -> bool {
@@ -746,6 +743,33 @@ mod tests {
             .into_iter()
             .map(|range| range.text)
             .collect()
+    }
+
+    #[test]
+    fn preserves_relative_paths_until_action_time() {
+        for path in ["README.md", "src/main.rs", "./src/main.rs", "../main.rs"] {
+            let target = file_target_for_local_path_token(&format!("{path}:12:3")).unwrap();
+            assert_eq!(target.path, PathBuf::from(path));
+            assert_eq!(target.line, Some(12));
+            assert_eq!(target.column, Some(3));
+        }
+    }
+
+    #[test]
+    fn keeps_absolute_home_and_file_url_paths_absolute() {
+        let absolute = std::env::current_dir().unwrap().join("src/main.rs");
+        let target = file_target_for_local_path_token(absolute.to_str().unwrap()).unwrap();
+        assert_eq!(target.path, absolute);
+        let url = Url::from_file_path(&absolute).unwrap();
+        assert_eq!(
+            file_target_for_file_url_token(url.as_str()).unwrap().path,
+            absolute
+        );
+        if let Some(home) = dirs::home_dir() {
+            let target = file_target_for_local_path_token("~/src/main.rs").unwrap();
+            assert_eq!(target.path, home.join("src/main.rs"));
+            assert!(target.path.is_absolute());
+        }
     }
 
     #[test]

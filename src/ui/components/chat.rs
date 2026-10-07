@@ -1316,12 +1316,8 @@ fn path_candidate_from_value(value: &str) -> Option<std::path::PathBuf> {
         return dirs::home_dir().map(|home| home.join(rest));
     }
 
-    let path = std::path::PathBuf::from(path_text);
-    if path.is_absolute() {
-        Some(path)
-    } else {
-        std::env::current_dir().ok().map(|cwd| cwd.join(path))
-    }
+    // Preserve workspace-relative tool paths just like detected hyperlinks.
+    Some(std::path::PathBuf::from(path_text))
 }
 
 fn path_matches_display(path: &std::path::Path, display: &str) -> bool {
@@ -9575,7 +9571,7 @@ mod tests {
 
         match target {
             crate::ui::hyperlink::HyperlinkTarget::File(target) => {
-                assert!(target.path.ends_with("src/ui/hyperlink.rs"));
+                assert_eq!(target.path, std::path::Path::new("src/ui/hyperlink.rs"));
             }
             crate::ui::hyperlink::HyperlinkTarget::Url(url) => {
                 panic!("expected file target, got {url}");
@@ -9717,7 +9713,10 @@ mod tests {
 
         match target {
             crate::ui::hyperlink::HyperlinkTarget::File(target) => {
-                assert!(target.path.ends_with("src/ui/components/dialog.rs"));
+                assert_eq!(
+                    target.path,
+                    std::path::Path::new("src/ui/components/dialog.rs")
+                );
             }
             crate::ui::hyperlink::HyperlinkTarget::Url(url) => {
                 panic!("expected file target, got {url}");

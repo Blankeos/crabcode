@@ -1,11 +1,190 @@
 use anyhow::{anyhow, Context, Result};
-use std::path::Path;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OpenOutcome {
     Spawned,
     Suspend(String),
+}
+
+/// Make a path absolute without filesystem access or canonicalization.
+/// Preserve symlinks and parent components: `link/../file` must resolve relative
+/// to the symlink target, not the directory containing the link. Nonexistent
+/// paths are accepted unchanged apart from prepending the current directory.
+pub fn absolute_file_path(path: &Path) -> Result<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .context("failed to determine current directory")?
+            .join(path)
+    };
+    if !absolute.is_absolute() {
+        return Err(anyhow!("cannot make path absolute: {}", path.display()));
+    }
+    Ok(absolute)
+}
+
+const TEXT_SAMPLE_BYTES: usize = 64 * 1024;
+
+/// Conservative prefix heuristic, not a MIME detector. Read at most 64 KiB + 5
+/// bytes (UTF-8 boundary lookahead and EOF sentinel); never read directories or special files.
+/// Binary data beyond this prefix and unknown UTF-8 containers can go undetected.
+pub(crate) fn is_plain_text_file(path: &Path) -> bool {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+    if !file.metadata().is_ok_and(|metadata| metadata.is_file()) {
+        return false;
+    }
+    let mut sample = Vec::with_capacity(TEXT_SAMPLE_BYTES + 5);
+    if file
+        .take((TEXT_SAMPLE_BYTES + 5) as u64)
+        .read_to_end(&mut sample)
+        .is_err()
+    {
+        return false;
+    }
+    let truncated = sample.len() > TEXT_SAMPLE_BYTES + 4;
+    sample.truncate(TEXT_SAMPLE_BYTES + 4);
+    text_sample(&sample, truncated)
+}
+
+fn text_sample(sample: &[u8], truncated: bool) -> bool {
+    if sample.contains(&0) || has_binary_signature(sample) {
+        return false;
+    }
+    let text = match std::str::from_utf8(sample) {
+        Ok(text) => text,
+        Err(error) if truncated && error.error_len().is_none() => {
+            // Only a partial final code point at the bounded-read edge is allowed.
+            std::str::from_utf8(&sample[..error.valid_up_to()]).unwrap()
+        }
+        Err(_) => return false,
+    };
+    !text
+        .chars()
+        .any(|c| c.is_control() && !matches!(c, '\t' | '\n' | '\r' | '\u{c}'))
+}
+
+fn has_binary_signature(sample: &[u8]) -> bool {
+    let header = sample.strip_prefix(b"\xef\xbb\xbf").unwrap_or(sample);
+    let header = header.trim_ascii_start();
+    // Accept offset PDF headers at line starts, not prose mentioning "%PDF-".
+    // This is deliberately narrower than what permissive PDF readers accept.
+    // Short printable container signatures (BM, OTTO, RIFF, etc.) also occur in
+    // ordinary text; their binary headers are left to the NUL/UTF-8/control checks.
+    header.starts_with(b"%PDF-")
+        || sample[..sample.len().min(1024)]
+            .split(|byte| matches!(byte, b'\n' | b'\r'))
+            .any(|line| line.trim_ascii_start().starts_with(b"%PDF-"))
+        || [
+            b"%!".as_slice(),
+            b"{\\rtf",
+            b"PK\x03\x04",
+            b"PK\x05\x06",
+            b"PK\x07\x08",
+            b"\x1f\x8b",
+            b"\xfd7zXZ\0",
+            b"7z\xbc\xaf\x27\x1c",
+            b"\x89PNG",
+            b"\xff\xd8\xff",
+            b"GIF87a",
+            b"GIF89a",
+            b"II*\0",
+            b"MM\0*",
+            b"\xd0\xcf\x11\xe0",
+            b"\x7fELF",
+            b"\0asm",
+        ]
+        .iter()
+        .any(|signature| header.starts_with(signature))
+        || sample.get(257..262) == Some(b"ustar".as_slice())
+}
+
+#[allow(dead_code)] // All command builders are exercised by platform-neutral tests.
+#[derive(Debug, Clone, Copy)]
+enum RevealPlatform {
+    Macos,
+    Windows,
+    Linux,
+}
+
+fn reveal_commands(platform: RevealPlatform, path: &Path) -> Result<Vec<Command>> {
+    let mut commands = Vec::new();
+    match platform {
+        RevealPlatform::Macos => {
+            let mut command = Command::new("open");
+            command.arg("-R").arg(path);
+            commands.push(command);
+        }
+        RevealPlatform::Windows => {
+            let mut command = Command::new("explorer.exe");
+            // Keep the switch separate so Windows quotes only the pathname.
+            command.arg("/select,").arg(path);
+            commands.push(command);
+        }
+        RevealPlatform::Linux => {
+            let uri = url::Url::from_file_path(path)
+                .map_err(|_| anyhow!("cannot create file URI for {}", path.display()))?;
+            let mut command = Command::new("dbus-send");
+            command.args([
+                "--session",
+                "--print-reply",
+                "--reply-timeout=5000",
+                "--type=method_call",
+                "--dest=org.freedesktop.FileManager1",
+                "/org/freedesktop/FileManager1",
+                "org.freedesktop.FileManager1.ShowItems",
+            ]);
+            // dbus-send uses commas as array separators, even within a file URI.
+            command.arg(format!("array:string:{}", uri.as_str().replace(',', "%2C")));
+            command.arg("string:");
+            commands.push(command);
+            let mut fallback = Command::new("xdg-open");
+            fallback.arg(path.parent().unwrap_or(path));
+            commands.push(fallback);
+        }
+    }
+    Ok(commands)
+}
+
+/// Select a path in the platform file manager; Linux falls back to its parent.
+/// Arguments are passed directly, never through a shell. Nonzero exits are errors.
+pub fn reveal_file_path(path: &Path) -> Result<()> {
+    let path = absolute_file_path(path)?;
+    #[cfg(target_os = "macos")]
+    let platform = RevealPlatform::Macos;
+    #[cfg(target_os = "windows")]
+    let platform = RevealPlatform::Windows;
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    let platform = RevealPlatform::Linux;
+    let mut failures = Vec::new();
+    for mut command in reveal_commands(platform, &path)? {
+        let name = command.get_program().to_string_lossy().into_owned();
+        match command.stdin(Stdio::null()).output() {
+            Ok(output) if output.status.success() => return Ok(()),
+            Ok(output) => failures.push(format!(
+                "{name}: {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            )),
+            Err(error) => failures.push(format!("{name}: {error}")),
+        }
+    }
+    Err(anyhow!(
+        "failed to reveal {}: {}",
+        path.display(),
+        failures.join("; ")
+    ))
 }
 
 pub fn expand_editor_open_command(
@@ -401,6 +580,238 @@ fn open_system_url(url: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn absolute_paths_preserve_symlink_parent_resolution() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("elsewhere/child")).unwrap();
+        std::fs::write(root.path().join("notes"), "wrong file").unwrap();
+        std::fs::write(root.path().join("elsewhere/notes"), "intended file").unwrap();
+        std::os::unix::fs::symlink("elsewhere/child", root.path().join("link")).unwrap();
+        let path = root.path().join("link/../notes");
+        let absolute = absolute_file_path(&path).unwrap();
+        assert_eq!(absolute, path);
+        assert_eq!(std::fs::read_to_string(absolute).unwrap(), "intended file");
+    }
+
+    #[test]
+    fn printable_container_prefixes_do_not_reject_text() {
+        for text in [
+            "BM",
+            "BMakefile\nall:\n\techo hello\n",
+            "OTTO is a name\n",
+            "MZ",
+            "RIFF",
+            "wOFF",
+            "wOF2",
+            "BZh",
+            "Rar!",
+            "SQLite format 3",
+        ] {
+            assert!(text_sample(text.as_bytes(), false), "{text:?}");
+        }
+        // Real headers for these formats still contain non-text bytes.
+        for header in [
+            b"BM\x3a\0\0\0".as_slice(),
+            b"OTTO\0\x01\0\x10",
+            b"RIFF\x24\0\0\0WAVE",
+            b"MZ\x90\0",
+            b"wOFFOTTO\0\0\x01\0",
+            b"wOF2OTTO\0\0\x01\0",
+            b"SQLite format 3\0",
+            b"BZh9\x31\x41\x59\x26\x53\x59\xff",
+            b"Rar!\x1a\x07\0",
+        ] {
+            assert!(!text_sample(header, false), "{header:?}");
+        }
+    }
+
+    #[test]
+    fn text_detection_is_content_based_and_conservative() {
+        let root = tempfile::tempdir().unwrap();
+        for (name, bytes, expected) in [
+            ("extensionless", b"hello\n".as_slice(), true),
+            ("unicode", "こんにちは 🦀\n".as_bytes(), true),
+            ("empty", b"".as_slice(), true),
+            ("looks-binary.png", b"actually text".as_slice(), true),
+            ("bom", "\u{feff}text".as_bytes(), true),
+            ("nul.txt", b"text\0data".as_slice(), false),
+            ("invalid.txt", b"text\xff".as_slice(), false),
+            ("incomplete.txt", b"text\xe2\x82".as_slice(), false),
+            ("pdf", b"%PDF-1.7\nASCII only".as_slice(), false),
+            ("pdf-offset", b"prefix\n%PDF-1.7\n".as_slice(), false),
+            ("pdf-docs.md", b"PDF begins with %PDF-".as_slice(), true),
+            ("pdf-bom", b"\xef\xbb\xbf%PDF-1.7\n".as_slice(), false),
+            ("ps", b"%!PS-Adobe-3.0\n".as_slice(), false),
+            ("rtf", b"{\\rtf1 hello}".as_slice(), false),
+            ("gif", b"GIF89aASCII".as_slice(), false),
+            ("zip", b"PK\x03\x04hello".as_slice(), false),
+        ] {
+            let path = root.path().join(name);
+            std::fs::write(&path, bytes).unwrap();
+            assert_eq!(is_plain_text_file(&path), expected, "{name}");
+        }
+        assert!(!is_plain_text_file(root.path()));
+        assert!(!is_plain_text_file(&root.path().join("missing")));
+    }
+
+    #[test]
+    fn bounded_text_sample_handles_utf8_edges_and_checks_lookahead() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("text");
+        // Split each possible position of a four-byte code point at both edges.
+        for edge in [TEXT_SAMPLE_BYTES, TEXT_SAMPLE_BYTES + 4] {
+            for offset in 1..=3 {
+                let mut bytes = vec![b'a'; edge - offset];
+                bytes.extend_from_slice("🦀 more text".as_bytes());
+                std::fs::write(&path, bytes).unwrap();
+                assert!(is_plain_text_file(&path), "edge {edge}, offset {offset}");
+            }
+        }
+        let mut bytes = vec![b'a'; TEXT_SAMPLE_BYTES - 1];
+        bytes.extend_from_slice(b"\xf0\xff\x80\x80rest");
+        std::fs::write(&path, bytes).unwrap();
+        assert!(!is_plain_text_file(&path));
+        let mut bytes = vec![b'a'; TEXT_SAMPLE_BYTES + 3];
+        bytes.push(0xe2); // EOF exactly at the sample cap is not a truncated sample.
+        std::fs::write(&path, bytes).unwrap();
+        assert!(!is_plain_text_file(&path));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn special_files_are_not_text() {
+        assert!(!is_plain_text_file(Path::new("/dev/null")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_text_falls_back_without_errors() {
+        use std::os::unix::fs::PermissionsExt;
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), "text").unwrap();
+        std::fs::set_permissions(file.path(), std::fs::Permissions::from_mode(0)).unwrap();
+        // Elevated test runners may still read mode-000 files.
+        if std::fs::File::open(file.path()).is_err() {
+            assert!(!is_plain_text_file(file.path()));
+            let mut editor = suspended_editor();
+            editor.text = Some(crate::config::configuration::EditorOpener {
+                open: "text-editor".into(),
+                suspend: false,
+            });
+            assert_eq!(
+                editor.opener_for_path(file.path()),
+                (editor.open.as_deref(), true)
+            );
+        }
+        std::fs::set_permissions(file.path(), std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    #[test]
+    fn text_priority_and_suspension_are_independent() {
+        use crate::config::configuration::EditorOpener;
+        let root = tempfile::tempdir().unwrap();
+        let mut editor = suspended_editor();
+        editor.text = Some(EditorOpener {
+            open: "text-editor +{line} -- {pathname}".into(),
+            suspend: true,
+        });
+        let path = root.path().join("notes");
+        std::fs::write(&path, "🦀").unwrap();
+        assert_eq!(
+            open_file_path_at_location(&path, 9, 2, &editor).unwrap(),
+            OpenOutcome::Suspend(
+                expand_editor_open_command("text-editor +{line} -- {pathname}", &path, 9, 2)
+                    .unwrap()
+            )
+        );
+        std::fs::write(&path, b"%PDF-1.7").unwrap();
+        assert_eq!(
+            editor.opener_for_path(&path),
+            (editor.open.as_deref(), true)
+        );
+        assert_eq!(
+            editor.opener_for_path(root.path()),
+            (editor.open.as_deref(), true)
+        );
+        assert_eq!(
+            editor.opener_for_path(&root.path().join("missing")),
+            (editor.open.as_deref(), true)
+        );
+    }
+
+    #[test]
+    fn absolute_paths_preserve_parents_without_requiring_existence() {
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(
+            absolute_file_path(Path::new("nonexistent/../a/./b")).unwrap(),
+            cwd.join("nonexistent/../a/./b")
+        );
+        assert_eq!(absolute_file_path(Path::new("")).unwrap(), cwd);
+        let root = tempfile::tempdir().unwrap();
+        assert_eq!(
+            absolute_file_path(&root.path().join("missing/../leaf")).unwrap(),
+            root.path().join("missing/../leaf")
+        );
+        #[cfg(unix)]
+        assert_eq!(
+            absolute_file_path(Path::new("/../../a")).unwrap(),
+            PathBuf::from("/../../a")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn absolute_paths_do_not_resolve_symlinks() {
+        let root = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink("elsewhere", root.path().join("link")).unwrap();
+        assert_eq!(
+            absolute_file_path(&root.path().join("link/file")).unwrap(),
+            root.path().join("link/file")
+        );
+    }
+
+    #[test]
+    fn reveal_command_arguments_are_shell_free_and_uri_encoded() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("odd 'name',; $(touch bad) 🦀.txt");
+        let args = |command: &Command| {
+            command
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        };
+        let mac = reveal_commands(RevealPlatform::Macos, &path).unwrap();
+        assert_eq!(mac[0].get_program(), "open");
+        assert_eq!(
+            args(&mac[0]),
+            vec!["-R".to_string(), path.to_string_lossy().into_owned()]
+        );
+        let windows = reveal_commands(RevealPlatform::Windows, &path).unwrap();
+        assert_eq!(windows[0].get_program(), "explorer.exe");
+        assert_eq!(
+            args(&windows[0]),
+            vec!["/select,".to_string(), path.to_string_lossy().into_owned()]
+        );
+        let linux = reveal_commands(RevealPlatform::Linux, &path).unwrap();
+        assert_eq!(linux[0].get_program(), "dbus-send");
+        let dbus_args = args(&linux[0]);
+        assert!(dbus_args.contains(&"org.freedesktop.FileManager1.ShowItems".to_string()));
+        let uri_arg = dbus_args
+            .iter()
+            .find(|a| a.starts_with("array:string:file://"))
+            .unwrap();
+        let uri = uri_arg.strip_prefix("array:string:").unwrap();
+        assert!(!uri.contains(','));
+        assert!(!uri.contains(' '));
+        assert_eq!(url::Url::parse(uri).unwrap().to_file_path().unwrap(), path);
+        assert_eq!(linux[1].get_program(), "xdg-open");
+        assert_eq!(
+            args(&linux[1]),
+            vec![root.path().to_string_lossy().into_owned()]
+        );
+    }
 
     fn suspended_editor() -> crate::config::EditorConfig {
         crate::config::EditorConfig {

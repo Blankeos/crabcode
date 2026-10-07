@@ -79,8 +79,7 @@ pub struct Input {
     draft_state: Option<DraftState>,
     local_images: Vec<LocalImageAttachment>,
     pending_pastes: Vec<PendingPaste>,
-    editor_config: crate::config::EditorConfig,
-    pending_editor_suspend: Option<String>,
+    pending_file_action: Option<PathBuf>,
     hovered_image_placeholder: Option<String>,
     hovered_paste_placeholder: Option<String>,
 }
@@ -135,8 +134,7 @@ impl Input {
             draft_state: None,
             local_images: Vec::new(),
             pending_pastes: Vec::new(),
-            editor_config: crate::config::EditorConfig::default(),
-            pending_editor_suspend: None,
+            pending_file_action: None,
             hovered_image_placeholder: None,
             hovered_paste_placeholder: None,
         }
@@ -351,12 +349,8 @@ impl Input {
         self
     }
 
-    pub fn take_editor_suspend(&mut self) -> Option<String> {
-        self.pending_editor_suspend.take()
-    }
-
-    pub fn set_editor_config(&mut self, config: crate::config::EditorConfig) {
-        self.editor_config = config;
+    pub fn take_file_action(&mut self) -> Option<PathBuf> {
+        self.pending_file_action.take()
     }
 
     pub fn contains_mouse(&self, mouse: MouseEvent) -> bool {
@@ -992,26 +986,7 @@ impl Input {
                 {
                     let offset = self.flat_offset_for_position(target_row, target_col);
                     if let Some(image) = self.image_at_offset(offset) {
-                        match crate::utils::file_opener::open_file_path(
-                            &image.path,
-                            &self.editor_config,
-                        ) {
-                            Ok(crate::utils::file_opener::OpenOutcome::Spawned) => {
-                                push_toast(Toast::new(
-                                    format!("Opened {}", image.placeholder),
-                                    ToastLevel::Info,
-                                    None,
-                                ))
-                            }
-                            Ok(crate::utils::file_opener::OpenOutcome::Suspend(command)) => {
-                                self.pending_editor_suspend = Some(command);
-                            }
-                            Err(err) => push_toast(Toast::new(
-                                format!("Failed to open image: {}", err),
-                                ToastLevel::Error,
-                                None,
-                            )),
-                        }
+                        self.pending_file_action = Some(image.path.clone());
                         return true;
                     }
                     if let Some((range, paste)) = self.paste_at_offset(offset) {
@@ -3363,18 +3338,13 @@ mod tests {
     }
 
     #[test]
-    fn image_click_uses_editor_and_requests_suspension() {
+    fn image_click_requests_file_actions_without_opening() {
         use ratatui::{backend::TestBackend, Terminal};
 
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("screenshot.png");
         std::fs::write(&path, [0, 255]).unwrap();
         let mut input = Input::new();
-        input.set_editor_config(crate::config::EditorConfig {
-            open: Some("my-editor {path}".to_string()),
-            suspend: true,
-            ..Default::default()
-        });
         input.attach_image(path.clone());
 
         let colors = test_colors();
@@ -3401,19 +3371,8 @@ mod tests {
             x,
             y,
         )));
-        assert_eq!(
-            input.take_editor_suspend(),
-            Some(
-                crate::utils::file_opener::expand_editor_open_command(
-                    "my-editor {path}",
-                    &path,
-                    1,
-                    1
-                )
-                .unwrap()
-            )
-        );
-        assert_eq!(input.take_editor_suspend(), None);
+        assert_eq!(input.take_file_action(), Some(path));
+        assert_eq!(input.take_file_action(), None);
     }
 
     #[test]

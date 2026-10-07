@@ -24,10 +24,11 @@ use crate::push_toast;
 use crate::toast::{self, Toast, ToastAction, ToastLevel};
 use crate::ui::components::action_dialog::{ActionDialog, ActionDialogEvent, ActionDialogItem};
 use crate::ui::components::chat::{Chat, ChatImageTarget};
+use crate::ui::components::file_actions::{FileAction, FileActionEvent, FileActions};
 use crate::ui::components::find::{FindBar, FindBarAction};
 use crate::ui::components::input::Input;
 use crate::ui::components::popup::Popup;
-use crate::ui::hyperlink::HyperlinkTarget;
+use crate::ui::hyperlink::{FileHyperlinkTarget, HyperlinkTarget};
 use crate::utils::git;
 
 use crate::tools::TerminalSessionEvent;
@@ -927,6 +928,7 @@ pub struct App {
     pub message_actions_dialog: Option<ActionDialog>,
     message_actions_return_focus: OverlayFocus,
     selection_action_bar: Option<SelectionActionBarState>,
+    file_actions: Option<FileActions>,
     pending_chat_message_click: Option<usize>,
     pub api_key_input: crate::ui::components::api_key_input::ApiKeyInput,
     provider_oauth_receiver: Option<tokio::sync::mpsc::UnboundedReceiver<ProviderOAuthTaskMessage>>,
@@ -1068,7 +1070,6 @@ impl App {
         let placeholder = Self::get_random_placeholder();
         let placeholder_static: &'static str = Box::leak(placeholder.into_boxed_str());
         input.set_placeholder(placeholder_static);
-        input.set_editor_config(crate::config::EditorConfig::default());
 
         let mut chat = Chat::new();
         chat.set_agent_mention_names(Vec::new());
@@ -1187,6 +1188,7 @@ impl App {
             message_actions_dialog: None,
             message_actions_return_focus: OverlayFocus::TimelineDialog,
             selection_action_bar: None,
+            file_actions: None,
             pending_chat_message_click: None,
             api_key_input,
             provider_oauth_receiver: None,
@@ -1303,8 +1305,6 @@ impl App {
         crate::remote_mcp::apply_mcp_overrides(&mut mcp_config, prefs_dao.as_ref());
         let warm_cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         self.mcp_manager = Some(crate::mcp::McpManager::ensure(mcp_config.clone(), warm_cwd));
-        self.input
-            .set_editor_config(loaded_config.merged_config.editor.clone());
         if !loaded_config.diagnostics.info.is_empty() {
             for msg in &loaded_config.diagnostics.info {
                 crate::startup_diag!("Config: {}", msg);
@@ -1979,7 +1979,7 @@ impl App {
     }
 
     fn open_selection_in_editor(&mut self) -> bool {
-        let Some(location) = self.selected_chat_editor_location() else {
+        let Some(mut location) = self.selected_chat_editor_location() else {
             push_toast(Toast::new(
                 "Selection is not on an editable code line",
                 ToastLevel::Error,
@@ -1987,6 +1987,11 @@ impl App {
             ));
             return true;
         };
+
+        if location.path.is_relative() {
+            location.path =
+                std::path::PathBuf::from(self.active_workspace_path()).join(&location.path);
+        }
 
         match crate::utils::file_opener::open_file_path_at_location(
             &location.path,
@@ -3791,6 +3796,11 @@ impl App {
     }
 
     pub fn handle_coalesced_mouse_scroll(&mut self, mouse: MouseEvent, notches: usize) {
+        self.validate_file_actions();
+        if self.file_actions.is_some() {
+            self.handle_mouse_event(mouse);
+            return;
+        }
         // The /btw panel scrolls independently (home and chat alike).
         if matches!(
             self.overlay_focus,
@@ -3828,6 +3838,12 @@ impl App {
             return;
         }
         self.note_user_activity();
+        self.validate_file_actions();
+        if let Some(popup) = self.file_actions.as_mut() {
+            let event = popup.handle_key(key);
+            self.apply_file_action_event(event);
+            return;
+        }
 
         if self.overlay_focus == OverlayFocus::FindBar && !self.can_open_find_bar() {
             self.close_find_bar_focus();
@@ -5296,6 +5312,18 @@ impl App {
             return false;
         }
 
+        if let Some(path) = self.input.take_file_action() {
+            self.show_file_actions(
+                FileHyperlinkTarget {
+                    path,
+                    line: None,
+                    column: None,
+                },
+                Position::new(mouse.column, mouse.row),
+            );
+            return true;
+        }
+
         if matches!(mouse.kind, MouseEventKind::Drag(MouseButton::Left))
             && self.input.has_selection()
             && !self.input.get_selected_text().is_empty()
@@ -5319,66 +5347,134 @@ impl App {
         true
     }
 
-    fn open_chat_image_target(&mut self, target: &ChatImageTarget) {
-        let path = std::path::Path::new(&target.path);
-        match crate::utils::file_opener::open_file_path(path, &self.editor) {
-            Ok(crate::utils::file_opener::OpenOutcome::Spawned) => push_toast(Toast::new(
-                format!("Opened {}", target.placeholder),
-                ToastLevel::Info,
-                None,
-            )),
-            Ok(crate::utils::file_opener::OpenOutcome::Suspend(command)) => {
-                self.pending_editor_suspend = Some(command);
-            }
-            Err(err) => push_toast(Toast::new(
-                format!("Failed to open image: {}", err),
-                ToastLevel::Error,
-                None,
-            )),
+    // File actions belong to the unobstructed chat/input, never to an async modal.
+    // Validate at every dispatch and paint: focus can change between mouse-down
+    // and the next key (permission/question/terminal requests arrive asynchronously).
+    fn validate_file_actions(&mut self) {
+        if self.overlay_focus != OverlayFocus::None {
+            self.file_actions = None;
         }
     }
 
-    fn open_chat_hyperlink_target(&mut self, target: &HyperlinkTarget) {
+    fn show_file_actions(&mut self, mut target: FileHyperlinkTarget, anchor: Position) {
+        self.validate_file_actions();
+        if self.overlay_focus != OverlayFocus::None {
+            return;
+        }
+        if target.path.is_relative() {
+            target.path = std::path::PathBuf::from(self.active_workspace_path()).join(&target.path);
+        }
+        match crate::utils::file_opener::absolute_file_path(&target.path) {
+            Ok(path) => target.path = path,
+            Err(err) => {
+                push_toast(Toast::new(
+                    format!("Failed to resolve file: {err}"),
+                    ToastLevel::Error,
+                    None,
+                ));
+                return;
+            }
+        }
+        self.dismiss_selection_actions();
+        self.pending_chat_message_click = None;
+        self.file_actions = Some(FileActions::new(target, anchor));
+    }
+
+    fn open_chat_image_target(&mut self, target: &ChatImageTarget, anchor: Position) {
+        self.show_file_actions(
+            FileHyperlinkTarget {
+                path: target.path.clone().into(),
+                line: None,
+                column: None,
+            },
+            anchor,
+        );
+    }
+
+    fn open_chat_hyperlink_target(&mut self, target: &HyperlinkTarget, anchor: Position) {
         match target {
-            HyperlinkTarget::File(target) => {
-                let result = if let Some(line) = target.line {
-                    crate::utils::file_opener::open_file_path_at_location(
-                        &target.path,
-                        line,
-                        target.column.unwrap_or(1),
-                        &self.editor,
-                    )
-                } else {
-                    crate::utils::file_opener::open_file_path(&target.path, &self.editor)
+            HyperlinkTarget::File(target) => self.show_file_actions(target.clone(), anchor),
+            HyperlinkTarget::Url(url) => match crate::utils::file_opener::open_url(url) {
+                Ok(()) => push_toast(Toast::new(format!("Opened {url}"), ToastLevel::Info, None)),
+                Err(err) => push_toast(Toast::new(
+                    format!("Failed to open link: {err}"),
+                    ToastLevel::Error,
+                    None,
+                )),
+            },
+        }
+    }
+
+    fn apply_file_action_event(&mut self, event: FileActionEvent) {
+        self.validate_file_actions();
+        match event {
+            FileActionEvent::None => {}
+            FileActionEvent::Dismiss => {
+                self.file_actions = None;
+            }
+            FileActionEvent::Choose(action) => {
+                let Some(popup) = self.file_actions.take() else {
+                    return;
+                };
+                if action == FileAction::Copy {
+                    self.copy_text_with_toast(&popup.copy_payload(), "Copied absolute path");
+                    return;
+                }
+                let target = popup.target;
+                if action == FileAction::Reveal {
+                    // push_toast uses the global Mutex<ToastManager>, so the
+                    // worker can report its outcome without borrowing the app.
+                    std::thread::spawn(move || {
+                        match crate::utils::file_opener::reveal_file_path(&target.path) {
+                            Ok(()) => push_toast(Toast::new(
+                                format!("Revealed {}", target.path.display()),
+                                ToastLevel::Info,
+                                None,
+                            )),
+                            Err(err) => push_toast(Toast::new(
+                                format!("File action failed: {err}"),
+                                ToastLevel::Error,
+                                None,
+                            )),
+                        }
+                    });
+                    return;
+                }
+                let result = match action {
+                    FileAction::Open => {
+                        let result = if let Some(line) = target.line {
+                            crate::utils::file_opener::open_file_path_at_location(
+                                &target.path,
+                                line,
+                                target.column.unwrap_or(1),
+                                &self.editor,
+                            )
+                        } else {
+                            crate::utils::file_opener::open_file_path(&target.path, &self.editor)
+                        };
+                        result.map(|outcome| {
+                            if let crate::utils::file_opener::OpenOutcome::Suspend(command) =
+                                outcome
+                            {
+                                self.pending_editor_suspend = Some(command);
+                            }
+                        })
+                    }
+                    FileAction::Reveal | FileAction::Copy => unreachable!(),
                 };
                 match result {
-                    Ok(crate::utils::file_opener::OpenOutcome::Spawned) => push_toast(Toast::new(
+                    Ok(()) => push_toast(Toast::new(
                         format!("Opened {}", target.path.display()),
                         ToastLevel::Info,
                         None,
                     )),
-                    Ok(crate::utils::file_opener::OpenOutcome::Suspend(command)) => {
-                        self.pending_editor_suspend = Some(command);
-                    }
                     Err(err) => push_toast(Toast::new(
-                        format!("Failed to open file: {}", err),
+                        format!("File action failed: {err}"),
                         ToastLevel::Error,
                         None,
                     )),
                 }
             }
-            HyperlinkTarget::Url(url) => match crate::utils::file_opener::open_url(url) {
-                Ok(()) => push_toast(Toast::new(
-                    format!("Opened {}", url),
-                    ToastLevel::Info,
-                    None,
-                )),
-                Err(err) => push_toast(Toast::new(
-                    format!("Failed to open link: {}", err),
-                    ToastLevel::Error,
-                    None,
-                )),
-            },
         }
     }
 
@@ -5400,6 +5496,13 @@ impl App {
 
         if matches!(mouse.kind, MouseEventKind::Moved) && !self.input.contains_mouse(mouse) {
             self.input.clear_hover();
+        }
+
+        self.validate_file_actions();
+        if let Some(popup) = self.file_actions.as_mut() {
+            let event = popup.handle_mouse(self.last_frame_size, mouse);
+            self.apply_file_action_event(event);
+            return;
         }
 
         if self.handle_update_toast_mouse(mouse) {
@@ -5833,7 +5936,10 @@ impl App {
                         self.chat_state.chat.set_hovered_image(Some(target.clone()));
                         self.pending_chat_message_click = None;
                         self.close_message_actions();
-                        self.open_chat_image_target(&target);
+                        self.open_chat_image_target(
+                            &target,
+                            Position::new(mouse.column, mouse.row),
+                        );
                         return;
                     }
 
@@ -5842,7 +5948,10 @@ impl App {
                     {
                         self.pending_chat_message_click = None;
                         self.close_message_actions();
-                        self.open_chat_hyperlink_target(&target);
+                        self.open_chat_hyperlink_target(
+                            &target,
+                            Position::new(mouse.column, mouse.row),
+                        );
                         return;
                     }
                 }
@@ -6013,7 +6122,10 @@ impl App {
                         {
                             self.chat_state.chat.set_hovered_image(Some(target.clone()));
                             self.pending_chat_message_click = None;
-                            self.open_chat_image_target(&target);
+                            self.open_chat_image_target(
+                                &target,
+                                Position::new(mouse.column, mouse.row),
+                            );
                             return;
                         }
 
@@ -6021,7 +6133,10 @@ impl App {
                             self.chat_state.chat.hyperlink_at_position(mouse, chat_area)
                         {
                             self.pending_chat_message_click = None;
-                            self.open_chat_hyperlink_target(&target);
+                            self.open_chat_hyperlink_target(
+                                &target,
+                                Position::new(mouse.column, mouse.row),
+                            );
                             return;
                         }
 
@@ -8453,9 +8568,7 @@ impl App {
     }
 
     pub fn take_editor_suspend(&mut self) -> Option<String> {
-        self.pending_editor_suspend
-            .take()
-            .or_else(|| self.input.take_editor_suspend())
+        self.pending_editor_suspend.take()
     }
 
     fn open_remote_dialog(&mut self) {
@@ -12628,6 +12741,7 @@ impl App {
     }
 
     pub fn render(&mut self, f: &mut ratatui::Frame) {
+        self.validate_file_actions();
         let size = f.area();
         self.last_frame_size = size;
         let colors = self.get_current_theme_colors();
@@ -13019,6 +13133,9 @@ impl App {
                 }
             };
             render_selection_action_bar(f, area, state, &colors);
+        }
+        if let Some(popup) = &self.file_actions {
+            popup.render(f, &colors);
         }
 
         toast::render_toasts(f, &get_toast_manager().lock().unwrap(), &colors);
@@ -13451,7 +13568,7 @@ mod tests {
     }
 
     #[test]
-    fn image_and_filename_clicks_resolve_to_same_editor_command() {
+    fn image_and_filename_clicks_show_actions_before_opening() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("screenshot.png");
         std::fs::write(&path, [0, 255]).unwrap();
@@ -13461,24 +13578,312 @@ mod tests {
             suspend: true,
             ..Default::default()
         };
-        app.open_chat_image_target(&ChatImageTarget {
-            message_index: 0,
-            image_index: 0,
-            placeholder: "[Image #1]".to_string(),
-            path: path.to_string_lossy().into_owned(),
-        });
-        let image_command = app
+        let anchor = Position::new(12, 5);
+        app.open_chat_image_target(
+            &ChatImageTarget {
+                message_index: 0,
+                image_index: 0,
+                placeholder: "[Image #1]".to_string(),
+                path: path.to_string_lossy().into_owned(),
+            },
+            anchor,
+        );
+        assert!(app.take_editor_suspend().is_none());
+        assert!(app.file_actions.is_some());
+        app.apply_file_action_event(FileActionEvent::Choose(FileAction::Open));
+        let command = app
             .take_editor_suspend()
-            .expect("image requested suspension");
-        app.open_chat_hyperlink_target(&HyperlinkTarget::File(
-            crate::ui::hyperlink::FileHyperlinkTarget {
+            .expect("Open requested suspension");
+        app.open_chat_hyperlink_target(
+            &HyperlinkTarget::File(FileHyperlinkTarget {
                 path,
                 line: None,
                 column: None,
+            }),
+            anchor,
+        );
+        assert!(app.take_editor_suspend().is_none());
+        app.apply_file_action_event(FileActionEvent::Choose(FileAction::Open));
+        assert_eq!(app.take_editor_suspend(), Some(command));
+        assert!(app.file_actions.is_none());
+    }
+
+    #[test]
+    fn file_actions_escape_and_outside_click_are_consumed() {
+        let mut app = test_app();
+        app.last_frame_size = Rect::new(0, 0, 80, 24);
+        let target = FileHyperlinkTarget {
+            path: "src/app.rs".into(),
+            line: Some(14),
+            column: Some(3),
+        };
+        app.show_file_actions(target.clone(), Position::new(12, 5));
+        app.handle_keys(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.file_actions.is_none());
+        assert!(app.take_editor_suspend().is_none());
+        app.show_file_actions(target, Position::new(12, 5));
+        app.handle_mouse_event(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(app.file_actions.is_none());
+        assert!(app.take_editor_suspend().is_none());
+    }
+
+    #[test]
+    fn file_actions_preserve_location_and_resolve_workspace_relative_path() {
+        let root = tempfile::tempdir().unwrap();
+        let mut app = test_app();
+        app.cwd = root.path().to_string_lossy().into_owned();
+        std::fs::write(root.path().join("file name.txt"), "text").unwrap();
+        app.editor = crate::config::EditorConfig {
+            open: Some("my-editor {path} {line} {col}".into()),
+            suspend: true,
+            ..Default::default()
+        };
+        app.show_file_actions(
+            FileHyperlinkTarget {
+                path: "file name.txt".into(),
+                line: Some(14),
+                column: Some(3),
             },
-        ));
-        assert_eq!(app.take_editor_suspend(), Some(image_command));
-        assert_eq!(app.take_editor_suspend(), None);
+            Position::new(2, 2),
+        );
+        let target = &app.file_actions.as_ref().unwrap().target;
+        assert!(target.path.is_absolute());
+        assert_eq!(target.path.file_name().unwrap(), "file name.txt");
+        assert_eq!(target.line, Some(14));
+        let expected = crate::utils::file_opener::expand_editor_open_command(
+            "my-editor {path} {line} {col}",
+            &target.path,
+            14,
+            3,
+        )
+        .unwrap();
+        app.apply_file_action_event(FileActionEvent::Choose(FileAction::Open));
+        assert_eq!(app.take_editor_suspend(), Some(expected));
+    }
+
+    fn file_action_test_target() -> FileHyperlinkTarget {
+        FileHyperlinkTarget {
+            path: "/tmp/example file.txt".into(),
+            line: Some(12),
+            column: Some(3),
+        }
+    }
+
+    #[test]
+    fn file_actions_copy_payload_is_absolute_path_without_location() {
+        let mut app = test_app();
+        app.show_file_actions(file_action_test_target(), Position::new(2, 2));
+        assert_eq!(
+            app.file_actions.as_ref().unwrap().copy_payload(),
+            "/tmp/example file.txt"
+        );
+    }
+
+    #[test]
+    fn file_actions_yield_to_permission_request_before_enter() {
+        let mut app = test_app();
+        let session = app.create_new_session(Some("test".into()));
+        app.show_file_actions(file_action_test_target(), Position::new(2, 2));
+        let (response_tx, mut response_rx) = tokio::sync::oneshot::channel();
+        app.process_streaming_chunk_for_session(
+            &session,
+            crate::llm::ChunkMessage::PermissionRequest(PermissionPrompt {
+                tool_call_id: None,
+                tool_id: "list".into(),
+                action: PermissionAction::List,
+                permission: "external_directory".into(),
+                patterns: vec!["/tmp/*".into()],
+                target: Some("/tmp".into()),
+                command: None,
+                workdir: None,
+                workspace: "/tmp".into(),
+                reason: "approval required".into(),
+                raw_input: serde_json::Value::Null,
+                response_tx,
+            }),
+        );
+        assert_eq!(app.overlay_focus, OverlayFocus::PermissionDialog);
+        app.handle_keys(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.file_actions.is_none());
+        assert!(app.take_editor_suspend().is_none());
+        assert!(response_rx.try_recv().is_ok());
+    }
+
+    #[test]
+    fn file_actions_yield_to_question_request_before_enter() {
+        let mut app = test_app();
+        let session = app.create_new_session(Some("test".into()));
+        app.show_file_actions(file_action_test_target(), Position::new(2, 2));
+        let (response_tx, mut response_rx) = tokio::sync::oneshot::channel();
+        app.process_streaming_chunk_for_session(
+            &session,
+            crate::llm::ChunkMessage::QuestionRequest {
+                tool_call_id: Some("question".into()),
+                questions: json!([{ "question": "Continue?", "options": [{ "label": "Yes" }] }]),
+                response_tx,
+            },
+        );
+        assert_eq!(app.overlay_focus, OverlayFocus::QuestionDialog);
+        app.handle_keys(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        // First Enter advances to the submit screen; second submits.
+        app.handle_keys(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.file_actions.is_none());
+        assert!(app.take_editor_suspend().is_none());
+        assert!(response_rx.try_recv().is_ok());
+    }
+
+    #[test]
+    fn file_actions_yield_to_terminal_focus_before_enter() {
+        let mut app = test_app();
+        app.show_file_actions(file_action_test_target(), Position::new(2, 2));
+        let (control_tx, mut control_rx) = tokio::sync::mpsc::unbounded_channel();
+        app.terminal_session_dialog_state
+            .enqueue(crate::tools::TerminalSessionRequest {
+                start: crate::tools::TerminalSessionStart {
+                    session_id: "test".into(),
+                    tool_call_id: "terminal".into(),
+                    command: "test".into(),
+                    description: "test".into(),
+                    workdir: None,
+                    cols: 80,
+                    rows: 24,
+                    job_id: None,
+                },
+                control_tx,
+            });
+        app.overlay_focus = OverlayFocus::TerminalSessionDialog;
+        app.handle_keys(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.file_actions.is_none());
+        assert!(app.take_editor_suspend().is_none());
+        assert!(
+            matches!(control_rx.try_recv().unwrap(), crate::tools::TerminalSessionControl::Input(bytes) if bytes == b"\r")
+        );
+    }
+
+    #[test]
+    fn file_actions_cannot_open_over_modal_and_are_dismissed_on_paint() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut app = test_app();
+        app.show_file_actions(file_action_test_target(), Position::new(2, 2));
+        enqueue_jobs_test_terminal(&mut app);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        assert!(app.file_actions.is_none());
+        app.show_file_actions(file_action_test_target(), Position::new(2, 2));
+        assert!(app.file_actions.is_none());
+    }
+
+    #[test]
+    fn file_actions_real_relative_chat_click_uses_active_workspace() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().canonicalize().unwrap();
+        std::fs::create_dir(workspace.join("src")).unwrap();
+        let path = workspace.join("src/workspace-only.rs");
+        std::fs::write(&path, "text").unwrap();
+        assert_ne!(workspace, std::env::current_dir().unwrap());
+
+        // Exercise both direct detection and the known-tool short-path lookup.
+        for message in [
+            crate::session::types::Message::assistant("Open src/workspace-only.rs:14:3"),
+            crate::session::types::Message::tool(
+                json!({
+                    "name": "read", "status": "ok",
+                    "args": { "file_path": "src/workspace-only.rs" },
+                    "title": "Read: src/workspace-only.rs",
+                })
+                .to_string(),
+            ),
+        ] {
+            let mut app = test_app();
+            app.cwd = std::env::current_dir()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
+            let session = app.create_new_session(Some("Workspace link".into()));
+            app.session_manager
+                .get_session(&session)
+                .unwrap()
+                .workspace_path = workspace.to_string_lossy().into_owned();
+            assert_ne!(app.active_workspace_path(), app.cwd);
+            app.base_focus = BaseFocus::Chat;
+            app.chat_state.chat.add_message(message);
+            let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+            terminal.draw(|frame| app.render(frame)).unwrap();
+            let area = app.current_chat_area();
+            let hit = (area.y..area.bottom())
+                .find_map(|y| {
+                    (area.x..area.right()).find_map(|x| {
+                        let event = mouse(MouseEventKind::Down(MouseButton::Left), x, y);
+                        app.chat_state
+                            .chat
+                            .hyperlink_at_position(event, area)
+                            .map(|_| event)
+                    })
+                })
+                .expect("rendered relative chat link hitbox");
+            app.handle_mouse_event(hit);
+            let popup = app.file_actions.as_ref().expect("file actions after click");
+            assert_eq!(popup.target.path, path);
+            assert_eq!(popup.copy_payload(), path.to_string_lossy());
+            assert!(app.take_editor_suspend().is_none());
+        }
+    }
+
+    #[test]
+    fn file_actions_real_chat_link_and_input_image_clicks() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("screenshot.png");
+        std::fs::write(&path, [0, 255]).unwrap();
+        let mut app = test_app();
+        app.base_focus = BaseFocus::Chat;
+        app.chat_state
+            .chat
+            .add_message(crate::session::types::Message::assistant(format!(
+                "[screenshot]({})",
+                path.display()
+            )));
+        app.input.attach_image(path.clone());
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let area = app.current_chat_area();
+        let hit = (area.y..area.bottom())
+            .find_map(|y| {
+                (area.x..area.right()).find_map(|x| {
+                    let event = mouse(MouseEventKind::Down(MouseButton::Left), x, y);
+                    app.chat_state
+                        .chat
+                        .hyperlink_at_position(event, area)
+                        .map(|_| event)
+                })
+            })
+            .expect("rendered chat link hitbox");
+        app.handle_mouse_event(hit);
+        assert_eq!(app.file_actions.as_ref().unwrap().target.path, path);
+        assert!(app.take_editor_suspend().is_none());
+        app.handle_keys(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        let buffer = terminal.backend().buffer();
+        let hit = (0..30)
+            .find_map(|y| {
+                (0..100).find_map(|x| {
+                    let text: String = (x..100).map(|col| buffer[(col, y)].symbol()).collect();
+                    text.starts_with("[Image #1]").then_some(mouse(
+                        MouseEventKind::Down(MouseButton::Left),
+                        x,
+                        y,
+                    ))
+                })
+            })
+            .expect("rendered input image placeholder");
+        app.handle_mouse_event(hit);
+        assert_eq!(app.file_actions.as_ref().unwrap().target.path, path);
+        assert!(app.take_editor_suspend().is_none());
     }
 
     fn test_app() -> App {
@@ -13491,11 +13896,7 @@ mod tests {
         App {
             running: true,
             version: "test".to_string(),
-            input: {
-                let mut input = Input::new();
-                input.set_editor_config(crate::config::EditorConfig::default());
-                input
-            },
+            input: Input::new(),
             command_registry: registry,
             session_manager: SessionManager::new(),
             home_state: init_home(),
@@ -13538,6 +13939,7 @@ mod tests {
             message_actions_dialog: None,
             message_actions_return_focus: OverlayFocus::TimelineDialog,
             selection_action_bar: None,
+            file_actions: None,
             pending_chat_message_click: None,
             api_key_input: crate::ui::components::api_key_input::ApiKeyInput::new(),
             provider_oauth_receiver: None,

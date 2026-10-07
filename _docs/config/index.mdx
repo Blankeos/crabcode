@@ -11,12 +11,12 @@ crabcode is meant to fit into the same config surface you already use for OpenCo
 
 crabcode finds the project root by walking up to the nearest `.git` directory. If no `.git` directory exists, the current directory is the project root.
 
-| Priority | Layer | Candidate files |
-| --- | --- | --- |
-| 1 | OpenCode global | `~/.config/opencode/opencode.jsonc`, `~/.config/opencode/opencode.json`, `~/.config/opencode.jsonc`, `~/.config/opencode.json` |
-| 2 | crabcode global | `~/.config/crabcode/crabcode.jsonc`, `~/.config/crabcode/crabcode.json`, `~/.config/crabcode.jsonc`, `~/.config/crabcode.json` |
-| 3 | OpenCode project | `<project>/.opencode/opencode.jsonc`, `<project>/.opencode/opencode.json`, `<project>/opencode.jsonc`, `<project>/opencode.json` |
-| 4 | crabcode project | `<project>/.crabcode/crabcode.jsonc`, `<project>/.crabcode/crabcode.json`, `<project>/.opencode/crabcode.jsonc`, `<project>/.opencode/crabcode.json`, `<project>/crabcode.jsonc`, `<project>/crabcode.json` |
+| Priority | Layer            | Candidate files                                                                                                                                                                                             |
+| -------- | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1        | OpenCode global  | `~/.config/opencode/opencode.jsonc`, `~/.config/opencode/opencode.json`, `~/.config/opencode.jsonc`, `~/.config/opencode.json`                                                                              |
+| 2        | crabcode global  | `~/.config/crabcode/crabcode.jsonc`, `~/.config/crabcode/crabcode.json`, `~/.config/crabcode.jsonc`, `~/.config/crabcode.json`                                                                              |
+| 3        | OpenCode project | `<project>/.opencode/opencode.jsonc`, `<project>/.opencode/opencode.json`, `<project>/opencode.jsonc`, `<project>/opencode.json`                                                                            |
+| 4        | crabcode project | `<project>/.crabcode/crabcode.jsonc`, `<project>/.crabcode/crabcode.json`, `<project>/.opencode/crabcode.jsonc`, `<project>/.opencode/crabcode.json`, `<project>/crabcode.jsonc`, `<project>/crabcode.json` |
 
 Higher priority layers override lower priority layers. Object values are deep-merged; `null` removes a value from a lower layer. If more than one candidate exists in the same layer, crabcode stops and asks you to keep only one.
 
@@ -24,10 +24,10 @@ If `XDG_CONFIG_HOME` is set, replace `~/.config` with `$XDG_CONFIG_HOME` in the 
 
 ## File layout
 
-| Platform | Directory | Root file 🟰 | Rules | Commands 🔀 | Agents | Skills 🔀 | MCP / config 🔀 |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| OpenCode | `.opencode/` | `AGENTS.md` | none | `.opencode/commands/` | `.opencode/agents/` | `.opencode/skills/` | `.opencode/opencode.jsonc` |
-| crabcode | `.crabcode/` | `AGENTS.md` | none | `.crabcode/commands/` | `.crabcode/agents/` | `.crabcode/skills/` | `.crabcode/crabcode.jsonc` |
+| Platform | Directory    | Root file 🟰 | Rules | Commands 🔀           | Agents              | Skills 🔀           | MCP / config 🔀            |
+| -------- | ------------ | ------------ | ----- | --------------------- | ------------------- | ------------------- | -------------------------- |
+| OpenCode | `.opencode/` | `AGENTS.md`  | none  | `.opencode/commands/` | `.opencode/agents/` | `.opencode/skills/` | `.opencode/opencode.jsonc` |
+| crabcode | `.crabcode/` | `AGENTS.md`  | none  | `.crabcode/commands/` | `.crabcode/agents/` | `.crabcode/skills/` | `.crabcode/crabcode.jsonc` |
 
 🟰 Same standard across both directories (e.g. `AGENTS.md` at project root). 🔀 Merges contributions from both directories. Same-name entries: crabcode wins.
 
@@ -39,36 +39,38 @@ If `XDG_CONFIG_HOME` is set, replace `~/.config` with `$XDG_CONFIG_HOME` in the 
   "model": "openai/gpt-5.2",
   "theme": "crabcode-orange",
   "tui": {
-    "compactMode": true
+    "compactMode": true,
   },
   "notifications": {
     "terminalCondition": "unfocused",
     "complete": {
       "terminal": "auto",
       "soundEnabled": true,
-      "desktop": true
+      "desktop": true,
     },
     "error": {
-      "soundEnabled": true
-    }
+      "soundEnabled": true,
+    },
   },
-  "editor": {
-    "open": "system"
+  "fileActions": {
+    "open": {
+      "default": "system",
+    },
   },
   "websearch": {
     "enabled": true,
     "provider": "exa-hosted-mcp",
     "native": {
       "web": false,
-      "x": true
-    }
+      "x": true,
+    },
   },
   "mcp": {
     "gh_grep": {
       "type": "remote",
-      "url": "https://mcp.grep.app"
-    }
-  }
+      "url": "https://mcp.grep.app",
+    },
+  },
 }
 ```
 
@@ -79,8 +81,8 @@ Use `tui.compactMode` to explicitly control compact mode and its sticky message 
 ```jsonc title="crabcode.jsonc"
 {
   "tui": {
-    "compactMode": false
-  }
+    "compactMode": false,
+  },
 }
 ```
 
@@ -95,8 +97,8 @@ Crabcode applies the OpenCode-compatible `compaction` settings to persisted TUI 
   "compaction": {
     "auto": true,
     "prune": false,
-    "reserved": 10000
-  }
+    "reserved": 10000,
+  },
 }
 ```
 
@@ -117,13 +119,13 @@ crabcode reads the OpenCode-compatible `permission` field. Rules resolve to `all
     "bash": {
       "*": "ask",
       "git *": "allow",
-      "git push *": "deny"
+      "git push *": "deny",
     },
     "edit": "ask",
     "external_directory": {
-      "~/projects/reference/**": "allow"
-    }
-  }
+      "~/projects/reference/**": "allow",
+    },
+  },
 }
 ```
 
@@ -134,18 +136,18 @@ You can also override permissions per agent. Agent rules are merged after global
 ```jsonc title="crabcode.jsonc"
 {
   "permission": {
-    "bash": "ask"
+    "bash": "ask",
   },
   "agent": {
     "build": {
       "permission": {
         "bash": {
           "*": "ask",
-          "git status *": "allow"
-        }
-      }
-    }
-  }
+          "git status *": "allow",
+        },
+      },
+    },
+  },
 }
 ```
 
@@ -190,14 +192,14 @@ JSON agents use the same registry and override markdown definitions when names m
       "max_steps": 8,
       "tools": ["read", "grep", "glob"],
       "permission": {
-        "edit": "deny"
+        "edit": "deny",
       },
       "task_permissions": {
         "explore": "allow",
-        "general": "deny"
-      }
-    }
-  }
+        "general": "deny",
+      },
+    },
+  },
 }
 ```
 
@@ -209,14 +211,14 @@ Direct `@agent` invocation is available for visible `subagent` and `all` agents.
 
 ## What belongs where
 
-| Need | Put it in |
-| --- | --- |
-| Shared OpenCode-compatible project config | `.opencode/opencode.jsonc` |
-| crabcode-only project settings | `.crabcode/crabcode.jsonc` or `crabcode.jsonc` |
-| Shared slash commands | `.opencode/commands/` |
-| crabcode-specific command overrides | `.crabcode/commands/` |
-| Personal defaults | `~/.config/crabcode/crabcode.jsonc` |
+| Need                                      | Put it in                                      |
+| ----------------------------------------- | ---------------------------------------------- |
+| Shared OpenCode-compatible project config | `.opencode/opencode.jsonc`                     |
+| crabcode-only project settings            | `.crabcode/crabcode.jsonc` or `crabcode.jsonc` |
+| Shared slash commands                     | `.opencode/commands/`                          |
+| crabcode-specific command overrides       | `.crabcode/commands/`                          |
+| Personal defaults                         | `~/.config/crabcode/crabcode.jsonc`            |
 
-See [Editor](/config/editor) for the unified opener used by file paths, image placeholders, and binary links, and [Image Attachments](/config/images) for attachment and vision-subagent behavior.
+See [File Actions config](/config/file-actions) for `fileActions.open`, the default opener and ordered filename/text overrides used by file paths, image placeholders, and binary links, and [Image Attachments](/config/images) for attachment and vision-subagent behavior.
 
 For command syntax, frontmatter, arguments, shell output, and file references, use the [OpenCode commands docs](https://opencode.ai/docs/commands/). crabcode reads the same markdown command format.

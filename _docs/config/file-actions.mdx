@@ -1,0 +1,480 @@
+---
+title: File Actions
+description: Open files, reveal them in your file manager, or copy their absolute paths, with recipes for your preferred editor.
+---
+
+Choose what to do with a file before leaving crabcode.
+
+# Click a file, choose an action
+
+Click a file path, an image placeholder, or a binary-file link to show a small action menu beside your cursor:
+
+| Action                 | Behavior                                                                                                                                                          |
+| ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Open**               | Uses your configured opener and overrides, preserving line and column information when the opener supports it.                                                    |
+| **Reveal**             | Selects the file in Finder on macOS or File Explorer on Windows. On Linux, requests selection in the file manager, falling back to opening the containing folder. |
+| **Copy absolute path** | Copies the absolute filesystem path without shell quoting or a line/column suffix.                                                                                |
+
+Use arrow keys or Tab to choose an action, then Enter. The shortcuts are `o` for Open, `r` for Reveal, and `y` for Copy. Escape or a click outside dismisses the menu. Web links still open directly.
+
+Only **Open** is configurable. Reveal and Copy ignore opener overrides. Selection actions that open a file in an editor use the same opener selection. `open` is the only configurable namespace under `fileActions`.
+
+Without opener configuration, crabcode uses the detected Zed, VS Code, or Cursor integrated editor, preserving line and column jumps. If no integrated editor is detected, it uses the system default application. Standalone terminals such as WezTerm and Ghostty use that system default.
+
+Terminal editors can open a new multiplexer tab or terminal window, or suspend crabcode to edit in the same terminal. ACP-compatible editors can also host crabcode as a subprocess; that is a different integration: [ACP](/acp).
+
+## Text-only routing
+
+Want source files in your editor, but images and binaries in their usual apps? Use `"system"` as the default and override text files:
+
+```jsonc title="crabcode.jsonc"
+{
+  "fileActions": {
+    "open": {
+      "default": "system",
+      "overrides": {
+        "type:text": {
+          "open": "nvim +{line} -- {pathname}",
+          "suspend": true,
+        },
+      },
+    },
+  },
+}
+```
+
+This runs Neovim in crabcode's terminal for UTF-8 text and restores crabcode when you quit. Binary and non-UTF-8 files use system apps—no extension lists needed. For a separate editor tab or window, choose a recipe below instead.
+
+### Keep specific formats in viewers
+
+Some formats, like SVG, are text but better suited to a viewer. Add filename exceptions **before** `type:text`:
+
+```jsonc title="crabcode.jsonc"
+{
+  "fileActions": {
+    "open": {
+      "default": "system",
+      "overrides": {
+        "*.{svg,svgz}": "system",
+        "*.{pdf,ps,eps,rtf}": "system",
+        "type:text": {
+          "open": "nvim +{line} -- {pathname}",
+          "suspend": true,
+        },
+      },
+    },
+  },
+}
+```
+
+You can add these exceptions to any recipe below, including Herdr. Rules run top to bottom; avoid `"*": "system"`, which would catch every text file too. System openers do not suspend crabcode.
+
+## Editor recipes
+
+The terminal-editor recipes use `"default": "system"` with a `type:text` override, so binary and non-UTF-8 files keep opening in system apps. Choose one editor command per recipe. Add any [filename exceptions](#filename-overrides) before `type:text`. Commands that launch another tab or window do not need `suspend: true`.
+
+### Direct terminal editor
+
+To run Helix or Neovim in crabcode's own terminal, suspend the TUI while editing:
+
+<Tabs items={["Helix", "Neovim"]} groupId="terminal-editor" persist label="Direct terminal editor">
+  <Tab value="Helix">
+
+```jsonc title="crabcode.jsonc"
+{
+  "fileActions": {
+    "open": {
+      "default": "system",
+      "overrides": {
+        "type:text": {
+          "open": "hx -- {location}",
+          "suspend": true,
+        },
+      },
+    },
+  },
+}
+```
+
+  </Tab>
+  <Tab value="Neovim">
+
+```jsonc title="crabcode.jsonc"
+{
+  "fileActions": {
+    "open": {
+      "default": "system",
+      "overrides": {
+        "type:text": {
+          "open": "nvim +{line} -- {pathname}",
+          "suspend": true,
+        },
+      },
+    },
+  },
+}
+```
+
+  </Tab>
+</Tabs>
+
+Suspension belongs to the text opener here. Opening an image or other non-text file does not suspend crabcode.
+
+### WezTerm and Ghostty
+
+Editors in standalone terminals normally have no single remote process unlike GUI editors. Open a new tab or window instead of copying.
+
+#### WezTerm
+
+`wezterm cli spawn` opens a tab in the current window (`WEZTERM_PANE` must be set):
+
+Choose the editor to launch in the new tab:
+
+<Tabs items={["Helix", "Neovim"]} groupId="terminal-editor" persist label="WezTerm editor">
+  <Tab value="Helix">
+
+```jsonc title="crabcode.jsonc"
+{
+  "fileActions": {
+    "open": {
+      "default": "system",
+      "overrides": {
+        "type:text": "wezterm cli spawn -- hx -- {pathname}:{line}:{column}",
+      },
+    },
+  },
+}
+```
+
+  </Tab>
+  <Tab value="Neovim">
+
+```jsonc title="crabcode.jsonc"
+{
+  "fileActions": {
+    "open": {
+      "default": "system",
+      "overrides": {
+        "type:text": "wezterm cli spawn -- nvim +{line} -- {pathname}",
+      },
+    },
+  },
+}
+```
+
+  </Tab>
+</Tabs>
+
+Add `--new-window` if you want a separate window.
+
+#### Ghostty
+
+<Tabs items={["macOS", "Linux"]} label="Ghostty platform">
+  <Tab value="macOS">
+
+On macOS, Ghostty has no CLI to add a tab to the current window. `open -na` starts a new Ghostty window:
+
+<Tabs items={["Helix", "Neovim"]} groupId="terminal-editor" persist label="Ghostty macOS editor">
+  <Tab value="Helix">
+
+```jsonc title="crabcode.jsonc"
+{
+  "fileActions": {
+    "open": {
+      "default": "system",
+      "overrides": {
+        "type:text": "open -na Ghostty.app --args -e hx -- {pathname}:{line}:{column}",
+      },
+    },
+  },
+}
+```
+
+  </Tab>
+  <Tab value="Neovim">
+
+```jsonc title="crabcode.jsonc"
+{
+  "fileActions": {
+    "open": {
+      "default": "system",
+      "overrides": {
+        "type:text": "open -na Ghostty.app --args -e nvim +{line} -- {pathname}",
+      },
+    },
+  },
+}
+```
+
+  </Tab>
+</Tabs>
+
+  </Tab>
+  <Tab value="Linux">
+
+On Linux, launch the editor in a new Ghostty window:
+
+<Tabs items={["Helix", "Neovim"]} groupId="terminal-editor" persist label="Ghostty Linux editor">
+  <Tab value="Helix">
+
+```jsonc title="crabcode.jsonc"
+{
+  "fileActions": {
+    "open": {
+      "default": "system",
+      "overrides": {
+        "type:text": "ghostty -e hx -- {pathname}:{line}:{column}",
+      },
+    },
+  },
+}
+```
+
+  </Tab>
+  <Tab value="Neovim">
+
+```jsonc title="crabcode.jsonc"
+{
+  "fileActions": {
+    "open": {
+      "default": "system",
+      "overrides": {
+        "type:text": "ghostty -e nvim +{line} -- {pathname}",
+      },
+    },
+  },
+}
+```
+
+  </Tab>
+</Tabs>
+
+  </Tab>
+</Tabs>
+
+### Multiplexers
+
+Choosing Open for a text file creates a new tab and runs Helix or Neovim there. You do not need a pane named `hx`.
+
+#### Herdr (recommended)
+
+Needs `jq`. Crabcode already reports agent status when `HERDR_PANE_ID` is set.
+
+<Tabs items={["Helix", "Neovim"]} groupId="terminal-editor" persist label="Herdr editor">
+  <Tab value="Helix">
+
+```jsonc title="crabcode.jsonc"
+{
+  "fileActions": {
+    "open": {
+      "default": "system",
+      "overrides": {
+        "type:text": "tab=$(herdr tab create --focus --label hx) && pane=$(printf '%s\\n' \"$tab\" | jq -er '.result.root_pane.pane_id // empty') && herdr pane run \"$pane\" hx -- {location}",
+      },
+    },
+  },
+}
+```
+
+  </Tab>
+  <Tab value="Neovim">
+
+```jsonc title="crabcode.jsonc"
+{
+  "fileActions": {
+    "open": {
+      "default": "system",
+      "overrides": {
+        "type:text": "tab=$(herdr tab create --focus --label nvim) && pane=$(printf '%s\\n' \"$tab\" | jq -er '.result.root_pane.pane_id // empty') && herdr pane run \"$pane\" nvim +{line} -- {pathname}",
+      },
+    },
+  },
+}
+```
+
+  </Tab>
+</Tabs>
+
+#### tmux
+
+<Tabs items={["Helix", "Neovim"]} groupId="terminal-editor" persist label="tmux editor">
+  <Tab value="Helix">
+
+```jsonc title="crabcode.jsonc"
+{
+  "fileActions": {
+    "open": {
+      "default": "system",
+      "overrides": {
+        "type:text": "tmux new-window -n hx -- hx -- {pathname}:{line}:{column}",
+      },
+    },
+  },
+}
+```
+
+  </Tab>
+  <Tab value="Neovim">
+
+```jsonc title="crabcode.jsonc"
+{
+  "fileActions": {
+    "open": {
+      "default": "system",
+      "overrides": {
+        "type:text": "tmux new-window -n nvim -- nvim +{line} -- {pathname}",
+      },
+    },
+  },
+}
+```
+
+  </Tab>
+</Tabs>
+
+#### Zellij
+
+<Tabs items={["Helix", "Neovim"]} groupId="terminal-editor" persist label="Zellij editor">
+  <Tab value="Helix">
+
+```jsonc title="crabcode.jsonc"
+{
+  "fileActions": {
+    "open": {
+      "default": "system",
+      "overrides": {
+        "type:text": "zellij action new-tab --name hx && zellij action write-chars \"hx -- {pathname_raw}:{line}:{column}\" && zellij action write 13",
+      },
+    },
+  },
+}
+```
+
+  </Tab>
+  <Tab value="Neovim">
+
+```jsonc title="crabcode.jsonc"
+{
+  "fileActions": {
+    "open": {
+      "default": "system",
+      "overrides": {
+        "type:text": "zellij action new-tab --name nvim && zellij action write-chars \"nvim +{line} -- {pathname_raw}\" && zellij action write 13",
+      },
+    },
+  },
+}
+```
+
+  </Tab>
+</Tabs>
+
+`write 13` is Enter. Both panes must be in the same Zellij session so `zellij action` reaches it.
+
+### VS Code, Zed, Cursor
+
+When crabcode runs in a Zed, VS Code, or Cursor integrated terminal, choosing Open already opens in that window. You do not need `fileActions.open.default` unless you want to pin the command.
+
+Images and binary links follow the same selection.
+
+<Tabs items={["Zed", "VS Code", "Cursor"]} groupId="gui-editor" persist label="GUI editor">
+  <Tab value="Zed">
+
+```jsonc title="crabcode.jsonc"
+{
+  "fileActions": {
+    "open": {
+      "default": "zed -- {location}",
+    },
+  },
+}
+```
+
+  </Tab>
+  <Tab value="VS Code">
+
+```jsonc title="crabcode.jsonc"
+{
+  "fileActions": {
+    "open": {
+      "default": "code --reuse-window --goto -- {location}",
+    },
+  },
+}
+```
+
+  </Tab>
+  <Tab value="Cursor">
+
+```jsonc title="crabcode.jsonc"
+{
+  "fileActions": {
+    "open": {
+      "default": "cursor --reuse-window --goto -- {location}",
+    },
+  },
+}
+```
+
+  </Tab>
+</Tabs>
+
+GUI editors can display images, so these defaults need no image override. Add [filename overrides](#filename-overrides) only if you want selected files to open elsewhere.
+
+### Custom editor
+
+`fileActions.open.default` is just a shell command. Any tool with CLI args works: a markdown previewer, a GUI you launch with `open -a`, a one-off script.
+
+```jsonc title="crabcode.jsonc"
+{
+  "fileActions": {
+    "open": {
+      "default": "my-markdown-editor {pathname}",
+    },
+  },
+}
+```
+
+See [command templates and placeholders](#command-templates-and-placeholders) for the available tokens.
+
+## Configuration at a glance
+
+Configure opening under `fileActions.open`. Both the default and override values accept these types:
+
+| Value                                | Meaning                                                                               |
+| ------------------------------------ | ------------------------------------------------------------------------------------- |
+| `"system"`                           | Open in the OS default application.                                                   |
+| Command string                       | Run a shell command with the file placeholders below; suspension defaults to `false`. |
+| `{ "open": "...", "suspend": true }` | Run the command in crabcode's own terminal, then restore the TUI when it exits.       |
+
+`default` is used when no override matches. Omit it or set it to `null` to use a detected integrated editor, otherwise the system application. Each opener has its own `suspend` setting; overrides do not inherit it from the default. An explicit command failure is reported rather than opening another app.
+
+### Filename overrides
+
+`overrides` is an ordered object: **the first matching rule wins**.
+
+- **Glob keys**, such as `*.svg` or `*.{pdf,ps,eps}`, match basenames case-insensitively—not full paths.
+- **`type:text`** matches content-detected UTF-8 text, including Unicode, extensionless files, and empty files. Put filename exceptions before it.
+- Only `type:text` is supported as a type selector. Unknown `type:` selectors warn and are skipped.
+
+Text detection checks up to 64 KiB plus five bytes, rejecting NULs, most control characters, invalid UTF-8, and recognized binary/container signatures. It is a heuristic, not full MIME detection: unusual formats or binary content beyond the sample may need a glob exception. Non-UTF-8 files, unreadable files, and directories do not match the text rule.
+
+### Command templates and placeholders
+
+Commands run through `sh -c` (`cmd /C` on Windows). `"system"` uses the native opener and needs no placeholders.
+
+| Token                                | Value                                              |
+| ------------------------------------ | -------------------------------------------------- |
+| `{pathname}`, `{path}`, `{filename}` | Shell-quoted file path                             |
+| `{pathname_raw}`, `{path_raw}`       | Unquoted file path, for use inside your own quotes |
+| `{line}`                             | Line number, `1` if unknown                        |
+| `{column}`, `{col}`                  | Column number, `1` if unknown                      |
+| `{location}`                         | Shell-quoted `path:line:column`                    |
+
+`{pathname}:{line}:{column}` stays one argument even with spaces in the path. If there is no path token, crabcode appends the quoted path.
+
+### Migrate from editor
+
+Legacy `editor` configuration still works. To migrate, move `editor.open` to `fileActions.open.default`, wrapping it in an opener object if it needs `suspend`. Move filename overrides into `fileActions.open.overrides`, then append the old `editor.text` command as `"type:text"` to preserve its priority.
+
+A valid `fileActions.open` replaces the whole legacy opening configuration. Invalid configuration structure warns and preserves the legacy settings; invalid individual rules warn and are skipped.

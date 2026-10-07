@@ -13,48 +13,49 @@ Most OpenCode docs apply directly: config is JSON/JSONC, project assets live und
 
 Blank cells mean that runtime behavior is not supported by that project today. `❌` means crabcode intentionally ignores the OpenCode setting.
 
-| Area / setting | OpenCode | crabcode | Notes |
-| --- | --- | --- | --- |
-| `model` | ✅ | ✅ | Default model when no persisted active model is set. |
-| `small_model` / `smallModel` | ✅ | ✅ | Not enabled by default. When configured, crabcode uses it for lightweight tasks such as session title generation. |
-| `default_agent` | ✅ | ✅ | Selects the startup agent mode. |
-| `command` config | ✅ | ✅ | JSON-defined slash commands with `template`, `description`, `agent`, `model`, and `subtask`. |
-| `.opencode/commands/*.md` | ✅ | ✅ | Markdown command files, including nested names. |
-| `.crabcode/commands/*.md` |  | ✅ | crabcode-specific command overrides. |
-| `$ARGUMENTS`, `$1`, `$2` | ✅ | ✅ | The final positional placeholder consumes the rest of the arguments. |
-| ``!`command` `` in command files | ✅ | ✅ | Runs from the project root and injects command output. |
-| `@path` file references in commands | ✅ | ✅ | File or directory content is appended to the rendered prompt. |
-| `AGENTS.md` project instructions | ✅ | ✅ | crabcode walks up from the working directory and prefers `AGENTS.md` over `CLAUDE.md` in the same directory. |
-| `~/.config/crabcode/AGENTS.md` |  | ✅ | crabcode global instructions. |
-| Claude Code fallback rules | ✅ | ✅ | `CLAUDE.md` and `~/.claude/CLAUDE.md` are read unless disabled by crabcode environment flags. |
-| Skills | ✅ | ✅ | Reads `SKILL.md` files from OpenCode, crabcode, Claude, and `.agents` skill roots. |
-| `agent.<name>.tools` | ✅ | ✅ | Tool allowlists feed the runtime agent registry. |
-| `agent.<name>.permission` | ✅ | ✅ | Agent-specific permission rules override global rules. |
-| `agent.<name>.task_permissions` | ✅ | ✅ | Controls which subagents an agent may invoke through Task. |
-| `agent.<name>.steps` / `maxSteps` / `max_steps` | ✅ | ✅ | Registry max-step values apply to primary agents and subagents. |
-| `agent.<name>.mode` / `hidden` | ✅ | ✅ | Modes control primary/subagent use; hidden agents are omitted from prompt and autocomplete listings. |
-| `agent.<name>.model` / `temperature` / `top_p` | ✅ | partial | Subagent `model` overrides are applied for Task/`@agent`; sampling settings are parsed but not yet applied. |
-| Markdown agent files | ✅ | ✅ | `.opencode/agents/*.md` frontmatter is parsed; body content becomes agent instructions. |
-| `provider.<id>.options.timeout` | ✅ | partial | Integer milliseconds or `false` to disable timeout. |
-| `provider.<id>` using `@ai-sdk/openai-compatible` | ✅ | ✅ | When `options.baseURL` is configured, crabcode requests its OpenAI-compatible `/v1/models` endpoint for `/models`. Discovered models are added alongside manually configured models; manually configured model metadata takes precedence; unsupported endpoints leave manual models unchanged. |
-| `theme` | ✅ | ✅ | In crabcode config files only. OpenCode config `theme` is ignored by crabcode. |
-| `notifications` |  | ✅ | crabcode-specific sounds, desktop notifications, and terminal alert signals such as Zed tab dots. |
-| `editor` |  | ✅ | crabcode-specific unified file opener with shell templates and filename overrides. See [Editor](/config/editor). |
-| `mcp` | ✅ | ✅ | Uses the OpenCode MCP config shape. Enabled servers are connected at runtime and their tools are exposed as crabcode tools. |
-| `permission` | ✅ | ✅ | Global tool permission rules are enforced during AI SDK tool execution. |
-| `instructions` | ✅ | ✅ | Loads the listed files relative to the project root (or from absolute and `~/` paths) and appends their contents to the system prompt. Unreadable files produce a config warning. |
-| `tools` | ✅ | ✅ | Global tool enable/disable map. Disabled tools are removed before agent-specific tool policies are applied. |
-| `compaction` | ✅ | ✅ | Applies `auto` and `reserved` to persisted TUI/ACP sessions; `prune` also applies to print and subagent requests. Manual `/compact` remains available when auto-compaction is disabled. |
-| `watcher` | ✅ | ✅ | Controls file suggestions in command autocomplete. Use `false` to disable them or `{ "ignore": ["path"] }` to exclude paths. |
-| `formatter` | ✅ |  | Accepted and parsed by file extension, but configured formatter commands are not run yet. |
-| `disabled_providers` | ✅ | ✅ | Removes the listed provider IDs from model discovery and selection. |
-| `enabled_providers` | ✅ | ✅ | Restricts model discovery and selection to the listed provider IDs. `disabled_providers` takes precedence when both are set. |
-| `keybinds` | ✅ | ❌ | Ignored because crabcode does not use OpenCode keybind config. |
-| `share` | ✅ | ❌ | Ignored. |
-| `tui` | ✅ | ❌ | Ignored. crabcode owns its terminal UI. |
-| `server` | ✅ | ❌ | Ignored. |
-| `plugin` | ✅ | ❌ | Ignored. |
-| custom tools (`tool`, `custom_tools`, `customTools`) | ✅ | ❌ | Ignored. |
+| Area / setting                                       | OpenCode | crabcode | Notes                                                                                                                                                                                                                                                                                          |
+| ---------------------------------------------------- | -------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `model`                                              | ✅       | ✅       | Default model when no persisted active model is set.                                                                                                                                                                                                                                           |
+| `small_model` / `smallModel`                         | ✅       | ✅       | Not enabled by default. When configured, crabcode uses it for lightweight tasks such as session title generation.                                                                                                                                                                              |
+| `default_agent`                                      | ✅       | ✅       | Selects the startup agent mode.                                                                                                                                                                                                                                                                |
+| `command` config                                     | ✅       | ✅       | JSON-defined slash commands with `template`, `description`, `agent`, `model`, and `subtask`.                                                                                                                                                                                                   |
+| `.opencode/commands/*.md`                            | ✅       | ✅       | Markdown command files, including nested names.                                                                                                                                                                                                                                                |
+| `.crabcode/commands/*.md`                            |          | ✅       | crabcode-specific command overrides.                                                                                                                                                                                                                                                           |
+| `$ARGUMENTS`, `$1`, `$2`                             | ✅       | ✅       | The final positional placeholder consumes the rest of the arguments.                                                                                                                                                                                                                           |
+| ``!`command` `` in command files                     | ✅       | ✅       | Runs from the project root and injects command output.                                                                                                                                                                                                                                         |
+| `@path` file references in commands                  | ✅       | ✅       | File or directory content is appended to the rendered prompt.                                                                                                                                                                                                                                  |
+| `AGENTS.md` project instructions                     | ✅       | ✅       | crabcode walks up from the working directory and prefers `AGENTS.md` over `CLAUDE.md` in the same directory.                                                                                                                                                                                   |
+| `~/.config/crabcode/AGENTS.md`                       |          | ✅       | crabcode global instructions.                                                                                                                                                                                                                                                                  |
+| Claude Code fallback rules                           | ✅       | ✅       | `CLAUDE.md` and `~/.claude/CLAUDE.md` are read unless disabled by crabcode environment flags.                                                                                                                                                                                                  |
+| Skills                                               | ✅       | ✅       | Reads `SKILL.md` files from OpenCode, crabcode, Claude, and `.agents` skill roots.                                                                                                                                                                                                             |
+| `agent.<name>.tools`                                 | ✅       | ✅       | Tool allowlists feed the runtime agent registry.                                                                                                                                                                                                                                               |
+| `agent.<name>.permission`                            | ✅       | ✅       | Agent-specific permission rules override global rules.                                                                                                                                                                                                                                         |
+| `agent.<name>.task_permissions`                      | ✅       | ✅       | Controls which subagents an agent may invoke through Task.                                                                                                                                                                                                                                     |
+| `agent.<name>.steps` / `maxSteps` / `max_steps`      | ✅       | ✅       | Registry max-step values apply to primary agents and subagents.                                                                                                                                                                                                                                |
+| `agent.<name>.mode` / `hidden`                       | ✅       | ✅       | Modes control primary/subagent use; hidden agents are omitted from prompt and autocomplete listings.                                                                                                                                                                                           |
+| `agent.<name>.model` / `temperature` / `top_p`       | ✅       | partial  | Subagent `model` overrides are applied for Task/`@agent`; sampling settings are parsed but not yet applied.                                                                                                                                                                                    |
+| Markdown agent files                                 | ✅       | ✅       | `.opencode/agents/*.md` frontmatter is parsed; body content becomes agent instructions.                                                                                                                                                                                                        |
+| `provider.<id>.options.timeout`                      | ✅       | partial  | Integer milliseconds or `false` to disable timeout.                                                                                                                                                                                                                                            |
+| `provider.<id>` using `@ai-sdk/openai-compatible`    | ✅       | ✅       | When `options.baseURL` is configured, crabcode requests its OpenAI-compatible `/v1/models` endpoint for `/models`. Discovered models are added alongside manually configured models; manually configured model metadata takes precedence; unsupported endpoints leave manual models unchanged. |
+| `theme`                                              | ✅       | ✅       | In crabcode config files only. OpenCode config `theme` is ignored by crabcode.                                                                                                                                                                                                                 |
+| `notifications`                                      |          | ✅       | crabcode-specific sounds, desktop notifications, and terminal alert signals such as Zed tab dots.                                                                                                                                                                                              |
+| `fileActions.open`                                   |          | ✅       | crabcode-specific Open action with shell templates and ordered filename/text overrides. See [File Actions](/config/file-actions).                                                                                                                                                              |
+| `editor`                                             |          | ✅       | Legacy opener configuration remains supported; `fileActions.open` replaces it when supplied. See [migration](/config/file-actions#migrate-from-editor).                                                                                                                                        |
+| `mcp`                                                | ✅       | ✅       | Uses the OpenCode MCP config shape. Enabled servers are connected at runtime and their tools are exposed as crabcode tools.                                                                                                                                                                    |
+| `permission`                                         | ✅       | ✅       | Global tool permission rules are enforced during AI SDK tool execution.                                                                                                                                                                                                                        |
+| `instructions`                                       | ✅       | ✅       | Loads the listed files relative to the project root (or from absolute and `~/` paths) and appends their contents to the system prompt. Unreadable files produce a config warning.                                                                                                              |
+| `tools`                                              | ✅       | ✅       | Global tool enable/disable map. Disabled tools are removed before agent-specific tool policies are applied.                                                                                                                                                                                    |
+| `compaction`                                         | ✅       | ✅       | Applies `auto` and `reserved` to persisted TUI/ACP sessions; `prune` also applies to print and subagent requests. Manual `/compact` remains available when auto-compaction is disabled.                                                                                                        |
+| `watcher`                                            | ✅       | ✅       | Controls file suggestions in command autocomplete. Use `false` to disable them or `{ "ignore": ["path"] }` to exclude paths.                                                                                                                                                                   |
+| `formatter`                                          | ✅       |          | Accepted and parsed by file extension, but configured formatter commands are not run yet.                                                                                                                                                                                                      |
+| `disabled_providers`                                 | ✅       | ✅       | Removes the listed provider IDs from model discovery and selection.                                                                                                                                                                                                                            |
+| `enabled_providers`                                  | ✅       | ✅       | Restricts model discovery and selection to the listed provider IDs. `disabled_providers` takes precedence when both are set.                                                                                                                                                                   |
+| `keybinds`                                           | ✅       | ❌       | Ignored because crabcode does not use OpenCode keybind config.                                                                                                                                                                                                                                 |
+| `share`                                              | ✅       | ❌       | Ignored.                                                                                                                                                                                                                                                                                       |
+| `tui`                                                | ✅       | ❌       | Ignored. crabcode owns its terminal UI.                                                                                                                                                                                                                                                        |
+| `server`                                             | ✅       | ❌       | Ignored.                                                                                                                                                                                                                                                                                       |
+| `plugin`                                             | ✅       | ❌       | Ignored.                                                                                                                                                                                                                                                                                       |
+| custom tools (`tool`, `custom_tools`, `customTools`) | ✅       | ❌       | Ignored.                                                                                                                                                                                                                                                                                       |
 
 ## MCP notes
 
@@ -66,11 +67,11 @@ MCP server `enabled` flags are respected. The remote UI can toggle configured se
 
 ## Use the OpenCode docs
 
-| Topic | Reference |
-| --- | --- |
-| Config shape | [OpenCode config](https://opencode.ai/docs/config/) |
-| Commands | [OpenCode commands](https://opencode.ai/docs/commands/) |
-| Rules | [OpenCode rules](https://opencode.ai/docs/rules/) |
-| Agents | [OpenCode agents](https://opencode.ai/docs/agents/) |
-| MCP | [OpenCode MCP servers](https://opencode.ai/docs/mcp/) |
-| Themes | [OpenCode themes](https://opencode.ai/docs/themes/) |
+| Topic        | Reference                                               |
+| ------------ | ------------------------------------------------------- |
+| Config shape | [OpenCode config](https://opencode.ai/docs/config/)     |
+| Commands     | [OpenCode commands](https://opencode.ai/docs/commands/) |
+| Rules        | [OpenCode rules](https://opencode.ai/docs/rules/)       |
+| Agents       | [OpenCode agents](https://opencode.ai/docs/agents/)     |
+| MCP          | [OpenCode MCP servers](https://opencode.ai/docs/mcp/)   |
+| Themes       | [OpenCode themes](https://opencode.ai/docs/themes/)     |
