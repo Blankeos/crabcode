@@ -1020,6 +1020,7 @@ pub struct App {
     cached_git_branch_path: String,
     last_git_branch_check: std::time::Instant,
     discovery: Option<crate::model::discovery::Discovery>,
+    model_metadata_warmup: Option<tokio::sync::oneshot::Receiver<()>>,
     cached_usage_text: String,
     cached_usage_check: (usize, u64, usize),
     cached_usage_streaming_base: crate::session::context::StreamingContextTokens,
@@ -1269,6 +1270,7 @@ impl App {
             cached_git_branch_path: String::new(),
             last_git_branch_check: now,
             discovery: None,
+            model_metadata_warmup: None,
             cached_usage_text: String::new(),
             cached_usage_check: (0, 0, 0),
             cached_usage_streaming_base: Default::default(),
@@ -1473,6 +1475,9 @@ impl App {
         self.provider_name = active_provider_name;
         self.small_model = small_model;
         self.reasoning_efforts = reasoning_efforts;
+        self.model_metadata_warmup = self.discovery.as_ref().and_then(|discovery| {
+            discovery.warmup_model_metadata(&self.provider_name, &self.model)
+        });
         self.sounds = resolved_sounds;
         self.notifications = loaded_config.merged_config.notifications.clone();
         self.editor = loaded_config.merged_config.editor.clone();
@@ -10977,6 +10982,15 @@ impl App {
     /// Drain background channels + streams. Returns true when an idle background
     /// completion needs one redraw (there is no animation to carry the repaint).
     pub fn process_streaming_chunks(&mut self) -> bool {
+        let metadata_ready = self.model_metadata_warmup.as_mut().is_some_and(|receiver| {
+            !matches!(
+                receiver.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            )
+        });
+        if metadata_ready {
+            self.model_metadata_warmup = None;
+        }
         self.process_provider_oauth_events();
         let meridian_was_pending = self.meridian_connection_receiver.is_some();
         self.process_meridian_connection_events();
@@ -11045,7 +11059,7 @@ impl App {
 
         self.sync_active_streaming_flag();
         self.update_sessions_dialog_live_state(false);
-        update_toasted || upgrade_toasted || meridian_toasted
+        update_toasted || upgrade_toasted || meridian_toasted || metadata_ready
     }
 
     fn process_streaming_chunk_for_session(
@@ -14214,6 +14228,7 @@ mod tests {
             cached_git_branch_path: ".".to_string(),
             last_git_branch_check: std::time::Instant::now(),
             discovery: None,
+            model_metadata_warmup: None,
             cached_usage_text: String::new(),
             cached_usage_check: (0, 0, 0),
             cached_usage_streaming_base: Default::default(),
@@ -14440,6 +14455,19 @@ mod tests {
             overrides.get(&("openai".to_string(), "gpt-5".to_string())),
             Some(&crate::model::reasoning::ReasoningEffort::High)
         );
+    }
+
+    #[test]
+    fn startup_model_metadata_completion_requests_exactly_one_idle_redraw() {
+        let mut app = test_app();
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        app.model_metadata_warmup = Some(receiver);
+        assert!(!app.process_streaming_chunks());
+        assert!(app.model_metadata_warmup.is_some());
+        sender.send(()).unwrap();
+        assert!(app.process_streaming_chunks());
+        assert!(app.model_metadata_warmup.is_none());
+        assert!(!app.process_streaming_chunks());
     }
 
     #[test]
