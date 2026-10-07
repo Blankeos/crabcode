@@ -1919,8 +1919,43 @@ impl Chat {
     }
 
     pub fn add_message(&mut self, message: Message) {
+        let mut dirty_from = self.messages.len();
+        // Only grouped tool rows look forward into subsequent messages. Ordinary
+        // messages (including their trailing spacing) do not depend on being last.
+        let extends_task = task_tool_item_for_message(&message).is_some();
+        let extends_exploration = exploration_tool_item_for_message(&message).is_some();
+        if extends_task || extends_exploration {
+            while dirty_from > 0 {
+                let previous = &self.messages[dirty_from - 1];
+                if (extends_task && task_tool_item_for_message(previous).is_some())
+                    || (extends_exploration
+                        && exploration_tool_item_for_message(previous).is_some())
+                {
+                    dirty_from -= 1;
+                } else {
+                    break;
+                }
+            }
+        }
+        // A new incomplete assistant takes over the streaming renderer from the
+        // previous segment, which must then render from its own message content.
+        if message.role == MessageRole::Assistant && !message.is_complete {
+            if let Some(previous) = self.streaming_assistant_idx() {
+                dirty_from = dirty_from.min(previous);
+            }
+        }
+        let pending = self.pending_streaming_render_dirty_from;
+        let content_dirty = self.pending_streaming_content_dirty;
+        if let Some(pending) = pending {
+            dirty_from = dirty_from.min(pending);
+        }
         self.messages.push(message);
-        self.invalidate_cache();
+        self.clear_ordered_tool_prefix_cache_from(dirty_from);
+        self.invalidate_cache_from(dirty_from);
+        // Append must not consume a throttled streaming refresh: its markdown
+        // renderer may still need to catch up even after this layout rebuild.
+        self.pending_streaming_render_dirty_from = pending;
+        self.pending_streaming_content_dirty = content_dirty;
         if self.should_autoscroll() {
             // Reset scroll to show new content at bottom
             // Content height will be recalculated on next render
@@ -3992,11 +4027,23 @@ impl Chat {
             && self.render_dirty_from != 0
             && self.render_dirty_from != usize::MAX
             && self.render_dirty_from < self.messages.len()
-            && self.render_dirty_from < self.cached_positions.len();
+            && self.render_dirty_from <= self.cached_positions.len();
 
-        if can_rebuild_tail {
-            let dirty_from = self.render_dirty_from;
-            let prefix_line_count = self.cached_positions[dirty_from];
+        let sanitize_from = if can_rebuild_tail {
+            let mut dirty_from = self.render_dirty_from;
+            // Group members share a start line; never truncate a group and
+            // rebuild only its suffix (also covers pending tool-row updates).
+            while dirty_from > 0
+                && self.cached_positions.get(dirty_from)
+                    == self.cached_positions.get(dirty_from - 1)
+            {
+                dirty_from -= 1;
+            }
+            let prefix_line_count = self
+                .cached_positions
+                .get(dirty_from)
+                .copied()
+                .unwrap_or(self.cached_lines.len());
             let mut message_positions = self.cached_positions[..dirty_from].to_vec();
             let (tail_lines, tail_locations, tail_positions) = self
                 .build_lines_with_locations_and_positions_from(
@@ -4017,6 +4064,7 @@ impl Chat {
             message_positions.extend(tail_positions);
             self.message_line_positions = message_positions.clone();
             self.cached_positions = message_positions;
+            prefix_line_count
         } else {
             let (message_lines, message_locations, message_positions) =
                 self.build_all_lines_with_locations_and_positions(max_width, model, colors);
@@ -4024,9 +4072,10 @@ impl Chat {
             self.cached_editor_locations = message_locations;
             self.message_line_positions = message_positions.clone();
             self.cached_positions = message_positions;
-        }
+            0
+        };
 
-        for line in &mut self.cached_lines {
+        for line in &mut self.cached_lines[sanitize_from..] {
             *line = sanitize_styled_line(line);
         }
 
@@ -7694,6 +7743,143 @@ mod tests {
             .iter()
             .map(|span| span.content.as_ref())
             .collect()
+    }
+
+    fn assert_append_cache_matches_full(chat: &mut Chat, width: usize) {
+        let colors = test_colors();
+        chat.ensure_render_cache(width, "model", &colors);
+        let (lines, locations, positions) =
+            chat.build_all_lines_with_locations_and_positions(width, "model", &colors);
+        let lines: Vec<_> = lines.iter().map(sanitize_styled_line).collect();
+        assert_eq!(chat.cached_lines, lines);
+        assert_eq!(chat.cached_editor_locations, locations);
+        assert_eq!(chat.cached_positions, positions);
+        assert_eq!(chat.message_line_positions, positions);
+        assert_eq!(chat.content_height, lines.len());
+    }
+
+    fn append_test_tool(name: &str, path: &str) -> Message {
+        Message::tool(
+            serde_json::json!({
+                "name": name, "status": "ok",
+                "args": { "path": path, "description": path, "subagent_type": "explore" }
+            })
+            .to_string(),
+        )
+    }
+
+    #[test]
+    fn append_cache_new_turn_and_batched_appends_match_full() {
+        for width in [18, 80] {
+            let mut chat = Chat::with_messages(vec![
+                Message::user("First question"),
+                Message::assistant("**Answer** with a wrapping paragraph and `code`."),
+            ]);
+            assert_append_cache_matches_full(&mut chat, width);
+            chat.add_message(Message::user("Next question\twith control\u{7} characters"));
+            assert_eq!(chat.render_dirty_from, 2);
+            chat.add_message(Message::assistant("Next answer"));
+            chat.add_message(Message::user("Third question"));
+            assert_eq!(chat.render_dirty_from, 2);
+            assert_append_cache_matches_full(&mut chat, width);
+            chat.add_message(Message::incomplete("Streaming answer"));
+            assert_append_cache_matches_full(&mut chat, width);
+        }
+    }
+
+    #[test]
+    fn append_cache_extends_entire_tool_group() {
+        for name in ["read", "task"] {
+            let mut chat = Chat::with_messages(vec![
+                Message::user("Inspect files"),
+                append_test_tool(name, "src/first.rs"),
+                append_test_tool(name, "src/second.rs"),
+            ]);
+            assert_append_cache_matches_full(&mut chat, 50);
+            assert_eq!(chat.cached_positions[1], chat.cached_positions[2]);
+            chat.add_message(append_test_tool(name, "src/third.rs"));
+            chat.add_message(append_test_tool(name, "src/fourth.rs"));
+            assert_eq!(chat.render_dirty_from, 1);
+            assert_append_cache_matches_full(&mut chat, 50);
+            chat.add_message(Message::assistant("Done"));
+            assert_eq!(chat.render_dirty_from, 5);
+            assert_append_cache_matches_full(&mut chat, 50);
+        }
+    }
+
+    #[test]
+    fn append_cache_compaction_and_editor_locations_match_full() {
+        let mut chat = Chat::with_messages(vec![Message::user("Start")]);
+        assert_append_cache_matches_full(&mut chat, 80);
+        let patch =
+            "*** Begin Patch\n*** Add File: tmp/append-test.rs\n+first\n+second\n*** End Patch\n";
+        chat.add_message(Message::tool(
+            serde_json::json!({
+                "name": "apply_patch", "status": "ok", "args": { "patch": patch },
+                "metadata": { "file_count": 1 }, "output_preview": "Applied patch: added 1"
+            })
+            .to_string(),
+        ));
+        assert_append_cache_matches_full(&mut chat, 80);
+        assert!(chat.cached_editor_locations.iter().any(Option::is_some));
+        chat.add_message(Message::user(format!(
+            "{}\nhidden summary",
+            crate::session::compaction::SUMMARY_PREFIX
+        )));
+        assert_append_cache_matches_full(&mut chat, 80);
+        chat.add_message(crate::session::compaction::compaction_marker(
+            crate::session::types::CompactionStats {
+                before_tokens: 1000,
+                after_tokens: 100,
+                before_messages: 8,
+                after_messages: 2,
+            },
+        ));
+        assert_append_cache_matches_full(&mut chat, 80);
+        chat.add_message(Message::user("After compaction"));
+        assert_append_cache_matches_full(&mut chat, 80);
+        // Layout changes must still discard the prefix.
+        assert_append_cache_matches_full(&mut chat, 25);
+    }
+
+    #[test]
+    fn append_cache_preserves_pending_streaming_dirty_range() {
+        let mut chat = Chat::with_messages(vec![
+            Message::user("Question"),
+            Message::incomplete("Original"),
+            append_test_tool("read", "src/first.rs"),
+        ]);
+        assert_append_cache_matches_full(&mut chat, 80);
+        chat.messages[1].append(" plus pending content");
+        chat.mark_streaming_render_pending(1, true);
+        chat.add_message(Message::user("Next question"));
+        assert_eq!(chat.render_dirty_from, 1);
+        assert_eq!(chat.pending_streaming_render_dirty_from, Some(1));
+        assert!(chat.pending_streaming_content_dirty);
+        assert_append_cache_matches_full(&mut chat, 80);
+        chat.add_message(Message::incomplete("New streaming segment"));
+        assert_eq!(chat.render_dirty_from, 1);
+        assert_append_cache_matches_full(&mut chat, 80);
+    }
+
+    #[test]
+    fn append_cache_does_not_rebuild_or_sanitize_unchanged_prefix() {
+        let mut chat = Chat::with_messages(vec![
+            Message::user("Question"),
+            Message::assistant("Answer"),
+        ]);
+        assert_append_cache_matches_full(&mut chat, 80);
+        // A cache-only sentinel catches both rebuilding and re-sanitizing the
+        // prefix, without timing thresholds or production instrumentation.
+        let sentinel = Line::raw("cached prefix\u{7}");
+        assert_ne!(sanitize_styled_line(&sentinel), sentinel);
+        chat.cached_lines[0] = sentinel.clone();
+        let prefix_len = chat.cached_lines.len();
+        chat.add_message(Message::user("Next question"));
+        chat.ensure_render_cache(80, "model", &test_colors());
+        assert_eq!(chat.cached_lines[0], sentinel);
+        assert_eq!(chat.cached_positions[2], prefix_len);
+        assert!(chat.cached_lines.len() > prefix_len);
     }
 
     fn trimmed_line_text(line: &Line<'_>) -> String {

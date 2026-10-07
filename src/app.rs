@@ -17,7 +17,6 @@ use crate::autocomplete::AutoComplete;
 use crate::command::handlers::register_all_commands;
 use crate::command::parser::InputType;
 use crate::command::registry::Registry;
-use crate::llm::client::stream_llm_with_cancellation;
 use crate::session::manager::SessionManager;
 use crate::tools::{PermissionResponse, ToolHandler};
 
@@ -1013,7 +1012,7 @@ pub struct App {
     discovery: Option<crate::model::discovery::Discovery>,
     cached_usage_text: String,
     cached_usage_check: (usize, u64, usize),
-    cached_usage_streaming_base: Option<StreamingUsageBase>,
+    cached_usage_streaming_base: crate::session::context::StreamingContextTokens,
     terminal_title_enabled: bool,
     terminal_title_items: Vec<crate::terminal_title::TerminalTitleItem>,
     terminal_title_last: Option<String>,
@@ -1028,42 +1027,8 @@ pub struct App {
     pub process_registry: std::sync::Arc<crate::tools::ProcessRegistry>,
 }
 
-/// Cached sum of context tokens for all completed messages of the currently
-/// viewed streaming session; only the streaming message changes per refresh.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct StreamingUsageBase {
-    session_id: Option<String>,
-    message_count: usize,
-    streaming_idx: Option<usize>,
-    base_tokens: usize,
-}
-
 impl App {
     const INTERRUPTED_TURN_CONTINUATION_GUIDANCE: &'static str = "The previous turn was interrupted. Address the newest request, then resume unfinished work unless the user canceled or redirected it. Do not claim completion prematurely.";
-
-    fn apply_turn_guidance(
-        messages: &mut Vec<crate::session::types::Message>,
-        turn_guidance: Option<&str>,
-    ) {
-        let Some(guidance) = turn_guidance
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        else {
-            return;
-        };
-
-        if let Some(system_message) = messages
-            .iter_mut()
-            .find(|message| message.role == crate::session::types::MessageRole::System)
-        {
-            if !system_message.content.trim().is_empty() {
-                system_message.content.push_str("\n\n");
-            }
-            system_message.content.push_str(guidance);
-        } else {
-            messages.insert(0, crate::session::types::Message::system(guidance));
-        }
-    }
 
     pub fn new() -> Result<Self> {
         Self::new_with_model_override(None, None)
@@ -1295,7 +1260,7 @@ impl App {
             discovery: None,
             cached_usage_text: String::new(),
             cached_usage_check: (0, 0, 0),
-            cached_usage_streaming_base: None,
+            cached_usage_streaming_base: Default::default(),
             terminal_title_enabled: crate::notify::terminal_title_supported(),
             terminal_title_items: crate::terminal_title::default_items(),
             terminal_title_last: None,
@@ -2937,46 +2902,13 @@ impl App {
     /// streaming message (already tracked by the chat's token counter) needs
     /// per-refresh accounting.
     fn streaming_context_tokens_cached(&mut self) -> usize {
-        let session_id = self.session_manager.get_current_session_id().cloned();
-        let messages = &self.chat_state.chat.messages;
-        let message_count = messages.len();
-        let streaming_idx = messages.iter().rposition(|message| {
-            message.role == crate::session::types::MessageRole::Assistant && !message.is_complete
-        });
-
-        let cache_valid = self
-            .cached_usage_streaming_base
-            .as_ref()
-            .is_some_and(|base| {
-                base.session_id == session_id
-                    && base.message_count == message_count
-                    && base.streaming_idx == streaming_idx
-            });
-        if !cache_valid {
-            let base_tokens = messages
-                .iter()
-                .enumerate()
-                .filter(|(idx, _)| Some(*idx) != streaming_idx)
-                .map(|(_, message)| crate::session::compaction::message_context_tokens(message))
-                .sum();
-            self.cached_usage_streaming_base = Some(StreamingUsageBase {
-                session_id,
-                message_count,
-                streaming_idx,
-                base_tokens,
-            });
-        }
-
-        let base_tokens = self
-            .cached_usage_streaming_base
-            .as_ref()
-            .map(|base| base.base_tokens)
-            .unwrap_or(0);
-        if streaming_idx.is_some() {
-            base_tokens.saturating_add(self.chat_state.chat.streaming_token_count())
-        } else {
-            base_tokens
-        }
+        self.cached_usage_streaming_base.count(
+            self.session_manager
+                .get_current_session_id()
+                .map(String::as_str),
+            &self.chat_state.chat.messages,
+            self.chat_state.chat.streaming_token_count(),
+        )
     }
 
     fn reasoning_capability_for_model(
@@ -11179,12 +11111,6 @@ impl App {
         &self,
         pending_message: Option<&crate::session::types::Message>,
     ) -> bool {
-        let mut messages = self.chat_state.chat.messages.clone();
-        if let Some(message) = pending_message {
-            messages.push(message.clone());
-        }
-        let used_tokens = crate::session::compaction::total_context_tokens(&messages)
-            .saturating_add(self.mcp_tool_prefix_tokens());
         let (context_window, max_output_tokens) = self
             .discovery
             .as_ref()
@@ -11196,12 +11122,22 @@ impl App {
                 )
             })
             .unwrap_or((None, None));
-        if !crate::session::compaction::should_auto_compact(
+        let Some(threshold) = crate::session::compaction::auto_compaction_threshold(
             &self.compaction,
-            used_tokens,
             context_window,
             max_output_tokens,
-        ) {
+        ) else {
+            return false;
+        };
+        let used_tokens =
+            crate::session::compaction::total_context_tokens(&self.chat_state.chat.messages)
+                .saturating_add(
+                    pending_message
+                        .map(crate::session::compaction::message_context_tokens)
+                        .unwrap_or(0),
+                )
+                .saturating_add(self.mcp_tool_prefix_tokens());
+        if used_tokens < threshold {
             return false;
         }
         crate::session::compaction::select_messages_for_compaction(
@@ -11732,7 +11668,6 @@ impl App {
         self.ensure_session_view_state(&session_id);
 
         let (sender, receiver) = mpsc::unbounded_channel();
-        let sender_clone = sender.clone();
 
         let cancel_token = tokio_util::sync::CancellationToken::new();
 
@@ -11753,8 +11688,9 @@ impl App {
         self.chat_state.chat.add_assistant_message("");
         if let Some(last_msg) = self.chat_state.chat.messages.last_mut() {
             last_msg.is_complete = false;
+            last_msg.model = streaming_model.clone();
+            last_msg.provider = streaming_provider.clone();
         }
-        self.chat_state.chat.mark_render_dirty();
 
         // Initialize per-turn streaming timing primitives (T0).
         self.chat_state.chat.begin_streaming_turn();
@@ -11771,7 +11707,13 @@ impl App {
             state.unread_completed = false;
             state.retry_status = None;
         }
-        self.persist_chat_messages_for_session(&session_id);
+        // The user message and prior turns are already persisted. Starting a
+        // turn must not serialize/rewrite the entire soft-compacted history.
+        if let Some(message) = self.chat_state.chat.messages.last() {
+            let _ = self
+                .session_manager
+                .add_message_to_session(&session_id, message);
+        }
         let _ = self.session_manager.set_session_status(
             &session_id,
             crate::session::types::SessionStatus::Streaming,
@@ -11798,114 +11740,28 @@ impl App {
         let custom_instructions = self.custom_instructions.clone();
         let process_registry = self.process_registry.clone();
         let cwd = self.cwd.clone();
-        let is_git_repo = crate::utils::git::is_git_repo(&cwd).unwrap_or(false);
 
         self.start_session_title_generation(&session_id, _user_message);
 
-        // Build messages with system prompt
-        let mut messages = self.chat_state.chat.messages.clone();
-
-        // Check if we already have a system message
-        let has_system = messages
-            .iter()
-            .any(|m| m.role == crate::session::types::MessageRole::System);
-
-        if !has_system {
-            let prompt_registry = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(async {
-                    let registry = crate::tools::initialize_tool_registry_with_dynamic_config(
-                        Some(sender.clone()),
-                        tool_permissions.clone(),
-                        agent_registry.clone(),
-                        cancel_token.clone(),
-                        Some(&provider_name),
-                        &websearch_config,
-                        &mcp_config,
-                        &cwd,
-                        process_registry.clone(),
-                    )
-                    .await;
-                    crate::tools::scope_tool_registry_for_agent(
-                        &registry,
-                        &tool_permissions,
-                        &agent_mode,
-                    )
-                    .await
-                })
-            });
-
-            // Create system prompt with tools
-            let composer = crate::prompt::SystemPromptComposer::new(
-                &model,
-                &cwd,
-                is_git_repo,
-                std::env::consts::OS,
-            )
-            .with_tool_registry(prompt_registry)
-            .with_agent_registry(agent_registry.clone())
-            .with_active_agent(agent_mode.clone())
-            .with_custom_instructions(custom_instructions);
-            let system_prompt = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(async { composer.compose().await })
-            });
-            let system_msg = crate::session::types::Message::system(system_prompt);
-            messages.insert(0, system_msg);
-        } else if let Some(store) = crate::skill::get_skill_store() {
-            for message in &mut messages {
-                if message.role == crate::session::types::MessageRole::System
-                    && !crate::session::compaction::is_compaction_marker(message)
-                {
-                    if crate::prompt::refresh_skill_guidance(&mut message.content, store.all()) {
-                        message.token_count = None;
-                    }
-                    break;
-                }
-            }
+        crate::llm::turn::TurnRequest {
+            session_id,
+            provider_name,
+            model,
+            reasoning_effort,
+            agent_mode,
+            agent_max_steps,
+            agent_registry,
+            tool_permissions,
+            websearch_config,
+            mcp_config,
+            compaction_config,
+            custom_instructions,
+            process_registry,
+            cwd,
+            provider_timeout,
+            turn_guidance: turn_guidance.map(str::to_owned),
         }
-
-        Self::apply_turn_guidance(&mut messages, turn_guidance);
-
-        tokio::spawn(async move {
-            let stream = stream_llm_with_cancellation(
-                cancel_token,
-                session_id,
-                provider_name,
-                model,
-                reasoning_effort,
-                agent_mode,
-                agent_max_steps,
-                agent_registry,
-                tool_permissions,
-                websearch_config,
-                mcp_config,
-                compaction_config,
-                cwd,
-                None,
-                messages,
-                sender_clone.clone(),
-                process_registry,
-            );
-
-            let result: Result<Result<(), Box<dyn std::error::Error>>, u64> = match provider_timeout
-            {
-                Some(crate::config::ProviderTimeout::Millis(ms)) => {
-                    match tokio::time::timeout(std::time::Duration::from_millis(ms), stream).await {
-                        Ok(inner) => Ok(inner),
-                        Err(_) => Err(ms),
-                    }
-                }
-                Some(crate::config::ProviderTimeout::Disabled) | None => Ok(stream.await),
-            };
-
-            let _ = match result {
-                Ok(Ok(())) => sender_clone.send(crate::llm::ChunkMessage::End),
-                Ok(Err(e)) => sender_clone.send(crate::llm::ChunkMessage::Failed(e.to_string())),
-                Err(ms) => sender_clone.send(crate::llm::ChunkMessage::Failed(format!(
-                    "Timeout: No response within {} ms",
-                    ms
-                ))),
-            };
-        });
+        .spawn(&self.chat_state.chat.messages, sender, cancel_token);
 
         Ok(())
     }
@@ -13749,7 +13605,7 @@ mod tests {
             discovery: None,
             cached_usage_text: String::new(),
             cached_usage_check: (0, 0, 0),
-            cached_usage_streaming_base: None,
+            cached_usage_streaming_base: Default::default(),
             terminal_title_enabled: false,
             terminal_title_items: crate::terminal_title::default_items(),
             terminal_title_last: None,
@@ -16669,34 +16525,6 @@ mod tests {
         assert!(!persisted_messages[1].is_complete);
     }
 
-    #[test]
-    fn interruption_guidance_augments_the_request_system_prompt() {
-        let mut messages = vec![
-            crate::session::types::Message::system("base prompt"),
-            crate::session::types::Message::user("new request"),
-        ];
-
-        App::apply_turn_guidance(
-            &mut messages,
-            Some(App::INTERRUPTED_TURN_CONTINUATION_GUIDANCE),
-        );
-
-        assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0].role, crate::session::types::MessageRole::System);
-        assert!(messages[0].content.starts_with("base prompt\n\n"));
-        assert!(messages[0].content.contains("resume unfinished work"));
-    }
-
-    #[test]
-    fn no_interruption_guidance_leaves_messages_unchanged() {
-        let mut messages = vec![crate::session::types::Message::system("base prompt")];
-        let expected = messages.clone();
-
-        App::apply_turn_guidance(&mut messages, None);
-
-        assert_eq!(messages, expected);
-    }
-
     #[tokio::test(flavor = "multi_thread")]
     async fn queued_image_messages_submit_as_single_record_with_renumbered_placeholders() {
         let mut app = test_app();
@@ -17188,6 +17016,116 @@ mod tests {
                 .len(),
             3
         );
+    }
+
+    // A current-thread runtime deliberately catches UI-side block_in_place:
+    // submitting must return without polling prompt setup or a provider request.
+    #[tokio::test]
+    async fn submit_appends_placeholder_without_replacing_history() {
+        let mut app = test_app();
+        app.session_manager = SessionManager::new().with_history().unwrap();
+        app.small_model = None;
+        let session_id = app.create_new_session(Some("Submit regression".to_string()));
+        app.append_user_message_to_current_session("old history".repeat(10_000), Vec::new());
+        app.append_user_message_to_current_session("new prompt".to_string(), Vec::new());
+        let old_content = app
+            .session_manager
+            .get_session_ref(&session_id)
+            .unwrap()
+            .messages[0]
+            .content
+            .as_ptr();
+        let colors = app.get_current_theme_colors();
+        app.chat_state
+            .chat
+            .ensure_render_cache(80, "model", &colors);
+
+        app.start_llm_streaming("new prompt").unwrap();
+
+        let session = app.session_manager.get_session_ref(&session_id).unwrap();
+        assert_eq!(session.messages.len(), 3);
+        assert_eq!(session.messages[0].content.as_ptr(), old_content);
+        let placeholder = &session.messages[2];
+        assert_eq!(
+            placeholder.role,
+            crate::session::types::MessageRole::Assistant
+        );
+        assert!(!placeholder.is_complete);
+        assert_eq!(placeholder.model.as_ref(), Some(&app.model));
+        assert_eq!(placeholder.provider.as_ref(), Some(&app.provider_name));
+        assert_eq!(placeholder.t0_ms, app.chat_state.chat.messages[2].t0_ms);
+        assert!(placeholder.t0_ms.is_some());
+        assert!(app.chat_state.chat.has_render_cache());
+
+        // Check disk too: the placeholder is durable before the async task runs.
+        let dao = crate::persistence::HistoryDAO::new().unwrap();
+        let db_id = app.session_manager.get_db_id(&session_id).unwrap();
+        let persisted = dao.get_messages(db_id).unwrap();
+        assert_eq!(persisted.len(), 3);
+        assert_eq!(persisted[2].id, placeholder.id);
+        assert_eq!(persisted[2].t0_ms, placeholder.t0_ms.map(|ms| ms as i64));
+        assert_eq!(persisted[2].model, placeholder.model);
+
+        // Cancel before yielding; no credentials, network or prompt setup needed.
+        app.stream_for_session_mut(&session_id)
+            .unwrap()
+            .cancel_token
+            .cancel();
+        tokio::task::yield_now().await;
+    }
+
+    /// Opt-in offline replay of a JSON array of persistence::Message records.
+    /// Never opens the live history database or polls a model request.
+    #[tokio::test]
+    #[ignore = "set CRABCODE_SUBMIT_BENCH_MESSAGES to an exported session JSON"]
+    async fn benchmark_long_session_submit() {
+        let path = std::env::var("CRABCODE_SUBMIT_BENCH_MESSAGES").unwrap();
+        let stored: Vec<crate::persistence::Message> =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let messages: Vec<crate::session::types::Message> = stored
+            .into_iter()
+            .map(|message| message.try_into().unwrap())
+            .collect();
+        let mut app = test_app();
+        app.session_manager = SessionManager::new().with_history().unwrap();
+        app.small_model = None;
+        let session_id = app.create_new_session(Some("Offline submit benchmark".to_string()));
+        app.chat_state.chat.replace_messages(messages);
+        assert!(app.persist_chat_messages_for_session(&session_id));
+        app.base_focus = BaseFocus::Chat;
+        // A long-running session already has a tokenizer from earlier turns.
+        app.chat_state
+            .chat
+            .prepare_streaming_token_counter(&app.model);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        let started = std::time::Instant::now();
+        app.handle_message_input("Offline benchmark prompt".to_string());
+        let submit = started.elapsed();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let first_frame = started.elapsed();
+        app.stream_for_session_mut(&session_id)
+            .unwrap()
+            .cancel_token
+            .cancel();
+
+        // Measure the removed full-history operations separately, on the same
+        // warmed transcript. These are not part of the optimized submit path.
+        let started = std::time::Instant::now();
+        assert!(app.persist_chat_messages_for_session(&session_id));
+        let full_save = started.elapsed();
+        let started = std::time::Instant::now();
+        app.chat_state.chat.mark_render_dirty();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let full_render = started.elapsed();
+        eprintln!(
+            "offline replay: submit={submit:?}, submit-to-frame={first_frame:?}, \
+             full-history save={full_save:?}, full-history redraw={full_render:?}"
+        );
+        tokio::task::yield_now().await;
+        assert!(app.session_manager.try_delete_session(&session_id).unwrap());
     }
 
     #[test]
@@ -17924,62 +17862,6 @@ mod tests {
             "footer should show stored usage cost, got {}",
             app.session_usage_text()
         );
-    }
-
-    #[test]
-    fn streaming_usage_base_caches_completed_messages_and_tracks_appends() {
-        let mut app = test_app();
-        app.chat_state
-            .chat
-            .add_message(crate::session::types::Message::user("hello there"));
-        let mut done = crate::session::types::Message::assistant("finished answer");
-        done.token_count = Some(100);
-        app.chat_state.chat.add_message(done);
-        app.chat_state
-            .chat
-            .add_message(crate::session::types::Message::incomplete("streaming..."));
-
-        let fresh = |app: &App| -> usize {
-            let messages = &app.chat_state.chat.messages;
-            let streaming_idx = messages.iter().rposition(|message| {
-                message.role == crate::session::types::MessageRole::Assistant
-                    && !message.is_complete
-            });
-            messages
-                .iter()
-                .enumerate()
-                .map(|(idx, message)| {
-                    if Some(idx) == streaming_idx {
-                        app.chat_state.chat.streaming_token_count()
-                    } else {
-                        crate::session::compaction::message_context_tokens(message)
-                    }
-                })
-                .sum()
-        };
-
-        let expected = fresh(&app);
-        assert_eq!(app.streaming_context_tokens_cached(), expected);
-        // Cached path must agree with a fresh walk on repeat calls.
-        assert_eq!(app.streaming_context_tokens_cached(), expected);
-        let cached_base = app
-            .cached_usage_streaming_base
-            .clone()
-            .expect("base cached");
-
-        // Appending a message invalidates the cached base.
-        let mut extra = crate::session::types::Message::assistant("more context");
-        extra.token_count = Some(40);
-        let last_idx = app.chat_state.chat.messages.len() - 1;
-        app.chat_state.chat.messages.insert(last_idx, extra);
-        let expected_after = fresh(&app);
-        assert_eq!(app.streaming_context_tokens_cached(), expected_after);
-        assert_ne!(
-            app.cached_usage_streaming_base,
-            Some(cached_base),
-            "cache should refresh when the message count changes"
-        );
-        assert!(expected_after > expected);
     }
 
     #[test]

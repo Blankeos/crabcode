@@ -111,11 +111,16 @@ pub fn context_start_index(messages: &[Message]) -> usize {
         .unwrap_or(0)
 }
 
+/// Borrow the active context from the latest compaction summary onward.
+/// Compaction markers remain in this slice and contribute zero context tokens.
+pub(super) fn context_messages(messages: &[Message]) -> &[Message] {
+    &messages[context_start_index(messages)..]
+}
+
 /// Messages the model should see: from the latest compaction summary onward,
 /// with compaction markers removed.
 pub fn filter_messages_for_context(messages: &[Message]) -> Vec<Message> {
-    let start = context_start_index(messages);
-    messages[start..]
+    context_messages(messages)
         .iter()
         .filter(|message| !is_compaction_marker(message))
         .cloned()
@@ -427,7 +432,8 @@ pub fn attach_summary_usage(messages: &mut [Message], usage: RecordedUsage) {
 
 /// Token count for the active model context (post-boundary), not full UI history.
 pub fn total_context_tokens(messages: &[Message]) -> usize {
-    filter_messages_for_context(messages)
+    // Counting must not clone tool outputs (or the rest of the active context).
+    context_messages(messages)
         .iter()
         .map(message_context_tokens)
         .sum()
@@ -441,9 +447,7 @@ pub fn message_context_tokens(message: &Message) -> usize {
     // Billed compaction usage can be persisted on the summary. Context is the
     // summary text, never those billed prompt tokens.
     if is_compaction_summary(message) {
-        return message
-            .token_count
-            .unwrap_or_else(|| estimate_tokens(&message.content));
+        return estimate_tokens(&message.content);
     }
 
     let part_tokens = message_parts_context_tokens(message);
