@@ -1,6 +1,7 @@
 {
   "$schema": "crabcode.schema.json",
-  // Opt into the user-run Meridian provider without selecting a default model.
+  // Opt into Meridian without selecting a default model.
+  // Crabcode starts the installed local meridian in the background when needed.
   // No key needed for an unprotected local endpoint; upstream login is separate.
   "provider": {
     "meridian": {

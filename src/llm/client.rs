@@ -1313,11 +1313,9 @@ async fn prepare_request_config(
     {
         provider
     } else {
-        let providers = discovery.fetch_providers().await?;
-
-        providers
-            .get(provider_name)
-            .cloned()
+        discovery
+            .fetch_provider_for_request(provider_name)
+            .await?
             .ok_or_else(|| anyhow::anyhow!("Provider not found: {}", provider_name))?
     };
 
@@ -1371,6 +1369,12 @@ async fn prepare_request_config(
         .get(&model_route.model_name)
         .and_then(|model| model.cost.clone());
     request_config.supports_audio_input = supports_audio_input;
+    crate::model::extensions::ModelExtensions::prepare_endpoint(
+        provider_name,
+        &request_config.base_url,
+        request_config.api_key.as_deref(),
+    )
+    .await?;
     // Anthropic via AI Gateway needs explicit cache markers; gateway "auto"
     // inserts them. Without this, Anthropic traffic never cache-reads.
     if is_vercel_ai_gateway(provider_name, &model_route.npm_package) {
