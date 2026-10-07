@@ -1,4 +1,8 @@
-//! Endpoint validation, Design MCP defaults, and metadata mapping for opt-in Meridian.
+//! Local lifecycle, endpoint validation, Design MCP defaults, and metadata for opt-in Meridian.
+
+mod runtime;
+
+pub(super) use runtime::{ensure_running, warmup_endpoint};
 
 use serde_json::Value;
 use std::collections::HashSet;
@@ -94,7 +98,7 @@ fn add_design_mcp_with_key(
     )) {
         return;
     }
-    let key = endpoint_key(connection, configured_key.or_else(environment_key));
+    let key = endpoint_key_with_environment(connection, configured_key, environment_key);
     let mut headers = std::collections::HashMap::new();
     if let Some(key) = key.as_deref().map(str::trim).filter(|key| !key.is_empty()) {
         let value = format!("Bearer {key}");
@@ -150,6 +154,24 @@ pub fn is_design_mcp(remote: &McpRemoteConfig) -> bool {
     normalized_design_url(&remote.url).is_some_and(|url| url.path().ends_with("/design/mcp"))
 }
 
+/// Readiness belongs to this adapter, not to the MCP transport. Only a local
+/// Meridian route can launch a process; remote or reverse-proxied routes do not.
+pub(super) async fn prepare_design_mcp(remote: &McpRemoteConfig) -> anyhow::Result<()> {
+    if !remote.oauth_enabled && is_design_mcp(remote) {
+        let key = remote.headers.iter().find_map(|(name, value)| {
+            if name.eq_ignore_ascii_case("authorization") {
+                value.strip_prefix("Bearer ")
+            } else if name.eq_ignore_ascii_case("x-api-key") {
+                Some(value.as_str())
+            } else {
+                None
+            }
+        });
+        ensure_running(&remote.url, key).await?;
+    }
+    Ok(())
+}
+
 pub fn provider() -> discovery::Provider {
     discovery::Provider {
         id: PROVIDER_ID.to_string(),
@@ -169,10 +191,55 @@ pub fn endpoint_key(
     connection: Option<&crate::persistence::AuthConfig>,
     configured_key: Option<String>,
 ) -> Option<String> {
+    endpoint_key_with_environment(connection, configured_key, || {
+        std::env::var(API_KEY_ENV).ok()
+    })
+}
+
+fn endpoint_key_with_environment(
+    connection: Option<&AuthConfig>,
+    configured_key: Option<String>,
+    environment_key: impl FnOnce() -> Option<String>,
+) -> Option<String> {
     match connection {
         Some(crate::persistence::AuthConfig::Local) => None,
         Some(crate::persistence::AuthConfig::Api { key }) => Some(key.clone()),
-        _ => configured_key,
+        _ => configured_key.or_else(environment_key),
+    }
+}
+
+#[cfg(test)]
+mod endpoint_key_tests {
+    use super::*;
+
+    #[test]
+    fn environment_fallback_and_explicit_connection_precedence() {
+        assert_eq!(
+            endpoint_key_with_environment(None, None, || Some("env-key".into())),
+            Some("env-key".into())
+        );
+        assert_eq!(
+            endpoint_key_with_environment(None, Some("configured-key".into()), || panic!(
+                "configured key wins"
+            )),
+            Some("configured-key".into())
+        );
+        assert_eq!(
+            endpoint_key_with_environment(Some(&AuthConfig::Local), None, || panic!(
+                "local connection is explicitly keyless"
+            )),
+            None
+        );
+        assert_eq!(
+            endpoint_key_with_environment(
+                Some(&AuthConfig::Api {
+                    key: "saved-key".into()
+                }),
+                None,
+                || panic!("saved key wins")
+            ),
+            Some("saved-key".into())
+        );
     }
 }
 
@@ -199,9 +266,8 @@ pub fn apply_connection(
     }
     if let Some(config) = providers.as_mut().and_then(|p| p.get_mut(PROVIDER_ID)) {
         *config = with_defaults(config.clone());
-        if matches!(connection, Some(crate::persistence::AuthConfig::Local)) {
-            config.api_key = None;
-        }
+        // Snapshot one endpoint-key policy for discovery, warmup and requests.
+        config.api_key = endpoint_key(connection, config.resolved_api_key());
     }
 }
 
@@ -234,6 +300,11 @@ pub async fn check_connection(
         config.base_url.as_deref().unwrap_or(BASE_URL),
     )
     .map_err(|_| anyhow::anyhow!("Invalid Meridian endpoint URL; check the configured base URL"))?;
+    ensure_running(
+        config.base_url.as_deref().unwrap_or(BASE_URL),
+        endpoint_key.as_deref(),
+    )
+    .await?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .build()
