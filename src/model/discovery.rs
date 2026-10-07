@@ -8,6 +8,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+mod endpoint_cache;
+
 const MODELS_DEV_API_URL: &str = "https://models.dev/api.json";
 const CACHE_TTL_SECONDS: u64 = 24 * 60 * 60;
 const CACHE_SCHEMA_VERSION: u32 = 5;
@@ -355,6 +357,26 @@ impl Discovery {
         signature
     }
 
+    // One endpoint's metadata must survive restarts and request-scoped discovery,
+    // but must not be reused for a different endpoint or account. Persist only
+    // the digest: neither the URL nor the endpoint key belongs in the cache key.
+    fn endpoint_metadata_key(&self, provider_id: &str) -> Option<String> {
+        use sha2::{Digest, Sha256};
+
+        let provider = self.custom_providers.as_ref()?.get(provider_id)?;
+        let signature = serde_json::to_vec(&(
+            provider_id,
+            provider.npm.as_deref(),
+            provider.base_url.as_deref()?,
+            self.endpoint_api_keys
+                .get(provider_id)
+                .cloned()
+                .or_else(|| provider.resolved_api_key()),
+        ))
+        .ok()?;
+        Some(format!("{:x}", Sha256::digest(signature)))
+    }
+
     fn custom_provider_endpoint_signature(&self) -> Vec<String> {
         let Some(custom_providers) = &self.custom_providers else {
             return Vec::new();
@@ -648,6 +670,20 @@ impl Discovery {
             ids.sort();
             ids.dedup();
 
+            // Last-known descriptors serve synchronous startup/UI lookups only.
+            // Do not seed the live discovery TTL from disk: requests and picker
+            // discovery must still validate the currently advertised model list.
+            if let Some(key) = self.endpoint_metadata_key(provider_id) {
+                let descriptors = endpoint_cache::EndpointModels {
+                    ids: ids.clone(),
+                    metadata: metadata.get(provider_id).cloned().unwrap_or_default(),
+                    updated_at: endpoint_cache::now(),
+                };
+                if let Err(error) = endpoint_cache::store(self.get_cache_path(), &key, descriptors)
+                {
+                    crate::emit_log!("Skipped endpoint model metadata cache: {}", error);
+                }
+            }
             advertised.insert(provider_id.clone(), ids);
         }
 
@@ -706,6 +742,15 @@ impl Discovery {
                     .map(|cached| cached.metadata.clone())
             })
             .unwrap_or_default();
+        self.apply_custom_catalog_with_metadata(providers, advertised, &discovered_metadata);
+    }
+
+    fn apply_custom_catalog_with_metadata(
+        &self,
+        providers: &mut HashMap<String, Provider>,
+        advertised: &HashMap<String, Vec<String>>,
+        discovered_metadata: &HashMap<String, HashMap<String, Model>>,
+    ) {
         // Discard static experiment rows from older models.dev caches. Meridian's
         // currently advertised list (plus explicit manual overrides) is authoritative.
         providers.insert(
@@ -781,10 +826,36 @@ impl Discovery {
     fn cached_model(&self, provider_id: &str, model_id: &str) -> Option<(Provider, Model)> {
         let entry = self.load_cache_entry().ok().flatten();
         let provider = entry.as_ref().and_then(|entry| entry.data.get(provider_id));
-        let advertised = self.cached_custom_model_ids();
-        let is_discovered = advertised
-            .get(provider_id)
-            .is_some_and(|ids| ids.iter().any(|id| id == model_id));
+        let endpoint_model = memory_custom_model_cache()
+            .lock()
+            .ok()
+            .and_then(|cache| {
+                let cached = cache.get(&(
+                    self.get_cache_path().clone(),
+                    self.custom_provider_endpoint_signature(),
+                ))?;
+                if cached.cached_at.elapsed() > cached.ttl {
+                    return None;
+                }
+                let ids = cached.ids.get(provider_id)?;
+                Some((
+                    ids.iter().any(|id| id == model_id),
+                    cached
+                        .metadata
+                        .get(provider_id)
+                        .and_then(|models| models.get(model_id))
+                        .cloned(),
+                ))
+            })
+            .or_else(|| {
+                let key = self.endpoint_metadata_key(provider_id)?;
+                let cached = endpoint_cache::load(self.get_cache_path(), &key)?;
+                Some((
+                    cached.ids.iter().any(|id| id == model_id),
+                    cached.metadata.get(model_id).cloned(),
+                ))
+            });
+        let (is_discovered, endpoint_metadata) = endpoint_model.unwrap_or_default();
         // Only this provider/model is materialized; pricing and limit lookups
         // must not clone the entire catalog on each streamed response.
         let mut providers = HashMap::new();
@@ -810,6 +881,9 @@ impl Discovery {
         if is_discovered {
             if let Some(metadata) = entry
                 .as_ref()
+                // Meridian descriptors must never inherit backend API pricing
+                // or capabilities just because an upstream model ID matches.
+                .filter(|_| provider_id != "meridian")
                 .and_then(|entry| catalog_model_metadata(&entry.data, provider_id, model_id))
             {
                 let reference =
@@ -830,7 +904,15 @@ impl Discovery {
             }
             ids.insert(provider_id.to_string(), vec![model_id.to_string()]);
         }
-        self.apply_custom_catalog(&mut providers, &ids);
+        let metadata = endpoint_metadata
+            .map(|model| {
+                HashMap::from([(
+                    provider_id.to_string(),
+                    HashMap::from([(model_id.to_string(), model)]),
+                )])
+            })
+            .unwrap_or_default();
+        self.apply_custom_catalog_with_metadata(&mut providers, &ids, &metadata);
         let mut provider = providers.remove(provider_id)?;
         let model = provider.models.remove(model_id)?;
         Some((provider, model))
@@ -943,6 +1025,42 @@ impl Discovery {
 
     pub fn cache_path(&self) -> &PathBuf {
         &self.cache_path
+    }
+
+    /// Fill a missing/stale active endpoint descriptor after first paint. Warm starts
+    /// use local metadata and schedule nothing; this never fetches models.dev or
+    /// probes unrelated endpoints. The receiver signals one UI redraw on finish.
+    pub fn warmup_model_metadata(
+        &self,
+        provider_id: &str,
+        model_id: &str,
+    ) -> Option<tokio::sync::oneshot::Receiver<()>> {
+        if !self.provider_is_enabled(provider_id) {
+            return None;
+        }
+        let provider = self.custom_providers.as_ref()?.get(provider_id)?;
+        if !is_openai_compatible(provider) || provider.base_url.is_none() {
+            return None;
+        }
+        let key = self.endpoint_metadata_key(provider_id)?;
+        if endpoint_cache::load(self.get_cache_path(), &key).is_some_and(|models| {
+            models.is_fresh(self.custom_discovery_ttl())
+                && models.ids.iter().any(|id| id == model_id)
+        }) {
+            return None;
+        }
+        let runtime = tokio::runtime::Handle::try_current().ok()?;
+        let mut scoped = self.clone();
+        scoped
+            .custom_providers
+            .as_mut()?
+            .retain(|id, _| id == provider_id);
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        runtime.spawn(async move {
+            scoped.discover_custom_model_ids().await;
+            let _ = sender.send(());
+        });
+        Some(receiver)
     }
 
     fn get_cache_path(&self) -> &PathBuf {
@@ -1550,6 +1668,7 @@ impl Discovery {
         if let Ok(mut cache) = memory_custom_model_cache().lock() {
             cache.clear();
         }
+        endpoint_cache::clear_memory_for_test();
         Ok(())
     }
 }
@@ -2880,6 +2999,308 @@ mod tests {
         discovery.clear_custom_model_discovery_cache();
         discovery.apply_custom_catalog(&mut providers, &HashMap::new());
         assert!(providers["meridian"].models.is_empty());
+    }
+
+    #[tokio::test]
+    async fn meridian_metadata_survives_restart_without_models_dialog_or_network() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = vec![0; 4096];
+            stream.read(&mut request).await.unwrap();
+            let body = serde_json::json!({"data": [{
+                "id": "claude-haiku-4.5",
+                "display_name": "Claude Haiku 4.5",
+                "context_window": 200000,
+                "capabilities": {"thinking": {"supported": true}}
+            }]})
+            .to_string();
+            stream.write_all(format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}", body.len(), body).as_bytes()).await.unwrap();
+        });
+        let mut discovery = Discovery::new_with_custom(Some(HashMap::from([(
+            "meridian".into(),
+            CustomProviderConfig {
+                name: None,
+                npm: None,
+                base_url: Some(format!("http://{address}/v1")),
+                api_key: Some("private-endpoint-key".into()),
+                models: HashMap::new(),
+            },
+        )])))
+        .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        discovery.cache_path = dir.path().join("models.json");
+        let ids = discovery.discover_custom_model_ids().await;
+        assert_eq!(ids["meridian"], ["claude-haiku-4.5"]);
+        server.await.unwrap(); // No server is running for the restored app.
+        let capability = discovery
+            .get_model_reasoning_capability("meridian", "claude-haiku-4.5")
+            .unwrap();
+        assert!(!capability.values().is_empty());
+
+        let metadata_key = discovery.endpoint_metadata_key("meridian").unwrap();
+        let cache_file = discovery
+            .cache_path
+            .with_extension("endpoints")
+            .join(format!("{metadata_key}.json"));
+        assert!(!fs::read_to_string(&cache_file)
+            .unwrap()
+            .contains("private-endpoint-key"));
+        assert!(!discovery.cache_path.exists(), "models.dev stays untouched");
+
+        // Recreate the startup Discovery after dropping all process-local state.
+        memory_custom_model_cache().lock().unwrap().remove(&(
+            discovery.cache_path.clone(),
+            discovery.custom_provider_endpoint_signature(),
+        ));
+        endpoint_cache::clear_memory_for_test();
+        let mut restored = Discovery::new_with_custom(discovery.custom_providers.clone()).unwrap();
+        restored.cache_path = discovery.cache_path.clone();
+        drop(discovery);
+        assert!(restored.cached_custom_model_ids().is_empty());
+        assert_eq!(
+            restored
+                .get_model_name("meridian", "claude-haiku-4.5")
+                .as_deref(),
+            Some("Claude Haiku 4.5")
+        );
+        assert_eq!(
+            restored.get_model_reasoning_capability("meridian", "claude-haiku-4.5"),
+            Some(capability)
+        );
+        assert_eq!(
+            restored.get_model_limit("meridian", "claude-haiku-4.5"),
+            Some(200000)
+        );
+        assert!(restored
+            .get_model_pricing("meridian", "claude-haiku-4.5")
+            .is_none());
+
+        // Disk metadata never seeds a live/request catalog or bypasses discovery.
+        let mut providers = HashMap::new();
+        restored.apply_custom_catalog(&mut providers, &HashMap::new());
+        assert!(providers["meridian"].models.is_empty());
+
+        let mut changed = restored.clone();
+        changed
+            .custom_providers
+            .as_mut()
+            .unwrap()
+            .get_mut("meridian")
+            .unwrap()
+            .base_url = Some("http://other-endpoint.invalid/v1".into());
+        assert!(changed
+            .get_model_name("meridian", "claude-haiku-4.5")
+            .is_none());
+        let mut changed = restored.clone();
+        changed
+            .endpoint_api_keys
+            .insert("meridian".into(), "different-key".into());
+        assert!(changed
+            .get_model_name("meridian", "claude-haiku-4.5")
+            .is_none());
+
+        // Current manual configuration still takes precedence over disk metadata.
+        restored
+            .custom_providers
+            .as_mut()
+            .unwrap()
+            .get_mut("meridian")
+            .unwrap()
+            .models
+            .insert(
+                "claude-haiku-4.5".into(),
+                CustomModelConfig {
+                    name: Some("Manual Haiku".into()),
+                    context_window: Some(100000),
+                    reasoning: Some(false),
+                    max_tokens: None,
+                    attachment: None,
+                    reasoning_options: None,
+                    temperature: None,
+                    tool_call: None,
+                    modalities: None,
+                    launch: false,
+                },
+            );
+        assert_eq!(
+            restored
+                .get_model_name("meridian", "claude-haiku-4.5")
+                .as_deref(),
+            Some("Manual Haiku")
+        );
+        assert_eq!(
+            restored.get_model_limit("meridian", "claude-haiku-4.5"),
+            Some(100000)
+        );
+        assert_eq!(
+            restored.get_model_reasoning_capability("meridian", "claude-haiku-4.5"),
+            Some(crate::model::reasoning::ReasoningCapability::Unsupported)
+        );
+    }
+
+    #[tokio::test]
+    async fn endpoint_metadata_restart_cache_is_replaced_by_live_discovery() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = vec![0; 4096];
+            stream.read(&mut request).await.unwrap();
+            let body = "{\"data\": []}";
+            stream.write_all(format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}", body.len(), body).as_bytes()).await.unwrap();
+        });
+        let mut discovery = Discovery::new_with_custom(Some(HashMap::from([(
+            "meridian".into(),
+            CustomProviderConfig {
+                name: None,
+                npm: None,
+                base_url: Some(format!("http://{address}/v1")),
+                api_key: None,
+                models: HashMap::new(),
+            },
+        )])))
+        .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        discovery.cache_path = dir.path().join("models.json");
+        let key = discovery.endpoint_metadata_key("meridian").unwrap();
+        endpoint_cache::store(
+            &discovery.cache_path,
+            &key,
+            endpoint_cache::EndpointModels {
+                ids: vec!["removed-model".into()],
+                updated_at: 0,
+                metadata: HashMap::from([(
+                    "removed-model".into(),
+                    crate::model::extensions::meridian::model_from_metadata(
+                        "removed-model",
+                        &serde_json::json!({"display_name": "Old Model"}),
+                    ),
+                )]),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            discovery
+                .get_model_name("meridian", "removed-model")
+                .as_deref(),
+            Some("Old Model")
+        );
+        discovery
+            .warmup_model_metadata("meridian", "removed-model")
+            .expect("stale descriptor schedules a background refresh")
+            .await
+            .unwrap();
+        server.await.unwrap();
+        assert!(discovery
+            .get_model_name("meridian", "removed-model")
+            .is_none());
+        memory_custom_model_cache().lock().unwrap().remove(&(
+            discovery.cache_path.clone(),
+            discovery.custom_provider_endpoint_signature(),
+        ));
+        endpoint_cache::clear_memory_for_test();
+        assert!(discovery
+            .get_model_name("meridian", "removed-model")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn startup_metadata_warmup_is_nonblocking_scoped_and_skipped_when_cached() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let unrelated = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let unrelated_address = unrelated.local_addr().unwrap();
+        let (request_seen, request_received) = tokio::sync::oneshot::channel();
+        let (release, wait_for_release) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = vec![0; 4096];
+            stream.read(&mut request).await.unwrap();
+            request_seen.send(()).unwrap();
+            wait_for_release.await.unwrap();
+            let body = serde_json::json!({"data": [{
+                "id": "claude-haiku-4.5", "display_name": "Claude Haiku 4.5",
+                "capabilities": {"thinking": true}
+            }]})
+            .to_string();
+            stream.write_all(format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}", body.len(), body).as_bytes()).await.unwrap();
+        });
+        let mut discovery = Discovery::new_with_custom(Some(HashMap::from([
+            (
+                "meridian".into(),
+                CustomProviderConfig {
+                    name: None,
+                    npm: None,
+                    api_key: None,
+                    models: HashMap::new(),
+                    base_url: Some(format!("http://{address}/v1")),
+                },
+            ),
+            (
+                "unrelated".into(),
+                CustomProviderConfig {
+                    name: None,
+                    npm: None,
+                    api_key: None,
+                    models: HashMap::new(),
+                    base_url: Some(format!("http://{unrelated_address}/v1")),
+                },
+            ),
+        ])))
+        .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        discovery.cache_path = dir.path().join("models.json");
+        let mut completion = discovery
+            .warmup_model_metadata("meridian", "claude-haiku-4.5")
+            .expect("cold start schedules metadata");
+        tokio::time::timeout(Duration::from_secs(2), request_received)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            completion.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        );
+        assert!(discovery
+            .get_model_name("meridian", "claude-haiku-4.5")
+            .is_none());
+        release.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), completion)
+            .await
+            .unwrap()
+            .unwrap();
+        server.await.unwrap();
+        assert_eq!(
+            discovery
+                .get_model_name("meridian", "claude-haiku-4.5")
+                .as_deref(),
+            Some("Claude Haiku 4.5")
+        );
+        assert!(!discovery
+            .get_model_reasoning_capability("meridian", "claude-haiku-4.5")
+            .unwrap()
+            .values()
+            .is_empty());
+        assert!(discovery
+            .warmup_model_metadata("meridian", "claude-haiku-4.5")
+            .is_none());
+        assert!(
+            !discovery.cache_path.exists(),
+            "startup never fetches models.dev"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), unrelated.accept())
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
