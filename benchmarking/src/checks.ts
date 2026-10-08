@@ -1,8 +1,10 @@
 import { spawnSync } from 'node:child_process'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { tailText } from './format.ts'
-import type { BenchmarkTask, CheckResult } from './types.ts'
+import type { BenchmarkTask, CheckResult, Grade, GradedFixture } from './types.ts'
+import { candidateSources, writeFiles } from './workspace.ts'
 
 export function runChecks(task: BenchmarkTask, workspace: string): CheckResult[] {
   try {
@@ -64,3 +66,28 @@ export function runCheckCommand(cwd: string, command: string, args: string[]) {
   }
 }
 
+export function gradeTask(task: GradedFixture, workspace: string): Grade {
+  const root = mkdtempSync(join(tmpdir(), 'crabcode-harness-grade-'))
+  try {
+    writeFiles(root, candidateSources(task, workspace))
+    writeFiles(root, { 'package.json': '{"type":"module"}\n', ...task.checks })
+    const checks = Object.keys(task.checks).map((path) => {
+      const result = spawnSync(process.execPath, ['test', `./${path}`], {
+        cwd: root,
+        encoding: 'utf8',
+        timeout: 10_000,
+        env: { PATH: process.env.PATH, HOME: root, XDG_CONFIG_HOME: root, NO_COLOR: '1', CI: '1' },
+      })
+      return {
+        name: path,
+        passed: result.status === 0 && !result.error,
+        output: (result.error?.message || `${result.stdout ?? ''}\n${result.stderr ?? ''}`).slice(-12_000),
+      }
+    })
+    return { passed: checks.length > 0 && checks.every((check) => check.passed), checks }
+  } catch (error) {
+    return { passed: false, checks: [{ name: 'grader', passed: false, output: String(error) }] }
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+}

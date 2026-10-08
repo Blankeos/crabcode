@@ -22,7 +22,12 @@ export function estimateTokens(text: string) {
   return Math.ceil(text.length / 4)
 }
 
-export function estimateCost(inputTokens: number, outputTokens: number, inputUsdPerMillion: number, outputUsdPerMillion: number) {
+export function estimateCost(
+  inputTokens: number,
+  outputTokens: number,
+  inputUsdPerMillion: number,
+  outputUsdPerMillion: number,
+) {
   return (inputTokens / 1_000_000) * inputUsdPerMillion + (outputTokens / 1_000_000) * outputUsdPerMillion
 }
 
@@ -39,3 +44,13 @@ export function escapeMarkdownTable(value: string) {
   return value.replaceAll('|', '\\|').replaceAll('\n', '<br>')
 }
 
+export function pairedOrder<T>(index: number, agents: readonly T[]): T[] {
+  return index % 2 === 0 ? [...agents] : [...agents].reverse()
+}
+
+export function median(values: number[]): number | null {
+  if (!values.length) return null
+  const sorted = [...values].sort((a, b) => a - b)
+  const mid = Math.floor(sorted.length / 2)
+  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2
+}
