@@ -1721,6 +1721,7 @@ impl AcpService {
                     crate::llm::ChunkMessage::TurnStopReason(reason) => {
                         turn_stop_reason = Some(reason)
                     }
+                    crate::llm::ChunkMessage::Diagnostic(_) => {}
                     crate::llm::ChunkMessage::PermissionRequest(prompt) => {
                         let response = cancellable(
                             cancellation,
