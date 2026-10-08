@@ -11095,6 +11095,8 @@ impl App {
         update_toasted || upgrade_toasted || meridian_toasted || metadata_ready
     }
 
+    /// Returns false only when the current stream stops; remaining drained chunks
+    /// belong to that old stream and must not be processed.
     fn process_streaming_chunk_for_session(
         &mut self,
         session_id: &str,
@@ -11193,7 +11195,7 @@ impl App {
                 true
             }
             crate::llm::ChunkMessage::TurnStopReason(_) => true,
-            crate::llm::ChunkMessage::Diagnostic(_) => false,
+            crate::llm::ChunkMessage::Diagnostic(_) => true,
             crate::llm::ChunkMessage::ToolCalls(tool_calls) => {
                 self.set_session_retry_status(session_id, None);
                 // Close the generation sample as a tool-calls finish (excluded from
@@ -16918,6 +16920,62 @@ mod tests {
                 .content,
             "hello world"
         );
+    }
+
+    #[test]
+    fn streaming_diagnostics_do_not_drop_text_or_completion() {
+        let mut app = test_app();
+        let session_id = app.create_new_session(Some("Streaming diagnostics".to_string()));
+        app.base_focus = BaseFocus::Chat;
+        app.chat_state
+            .chat
+            .add_message(crate::session::types::Message::incomplete(""));
+        app.chat_state.chat.begin_streaming_turn();
+
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        app.session_view_states.get_mut(&session_id).unwrap().stream =
+            Some(SessionStreamState::new(
+                receiver,
+                tokio_util::sync::CancellationToken::new(),
+                Some("test-model".to_string()),
+                Some("test-provider".to_string()),
+                0,
+            ));
+        app.is_streaming = true;
+
+        sender
+            .send(crate::llm::ChunkMessage::Diagnostic(serde_json::json!({
+                "event": "request_config",
+            })))
+            .unwrap();
+        sender
+            .send(crate::llm::ChunkMessage::Text("hello".to_string()))
+            .unwrap();
+        app.process_streaming_chunks();
+
+        assert_eq!(app.chat_state.chat.messages[0].content, "hello");
+        assert!(!app.chat_state.chat.messages[0].is_complete);
+        assert!(app.is_streaming);
+
+        sender
+            .send(crate::llm::ChunkMessage::Diagnostic(serde_json::json!({
+                "event": "provider_end",
+            })))
+            .unwrap();
+        sender
+            .send(crate::llm::ChunkMessage::Text(" world".to_string()))
+            .unwrap();
+        sender.send(crate::llm::ChunkMessage::End).unwrap();
+        // Keep the sender open: End must finalize the UI, not channel disconnect.
+        app.process_streaming_chunks();
+
+        assert!(!app.is_streaming);
+        assert!(app.session_view_states[&session_id].stream.is_none());
+        assert_eq!(app.chat_state.chat.messages[0].content, "hello world");
+        assert!(app.chat_state.chat.messages[0].is_complete);
+        let session = app.session_manager.get_session_ref(&session_id).unwrap();
+        assert_eq!(session.status, crate::session::types::SessionStatus::Idle);
+        assert_eq!(session.messages[0].content, "hello world");
     }
 
     #[test]
