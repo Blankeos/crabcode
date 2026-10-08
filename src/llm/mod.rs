@@ -1,4 +1,5 @@
 pub mod client;
+pub(crate) mod diagnostics;
 pub(crate) mod opencode;
 pub mod provider;
 pub mod tool_calls;
@@ -19,6 +20,8 @@ pub enum ChunkMessage {
         reasoning: String,
     },
     Warning(String),
+    /// Content-free host observability; ignored by interactive renderers.
+    Diagnostic(serde_json::Value),
     Usage(crate::aisdk::chunk::TokenUsage),
     ToolCalls(Vec<ToolCall>),
     ToolResult(ToolCallResult),

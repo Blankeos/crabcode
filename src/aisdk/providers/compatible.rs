@@ -329,11 +329,26 @@ fn openai_compatible_messages(
             Message::ToolCall(_) => {
                 let mut tool_calls = Vec::new();
                 let mut reasoning_content = None;
-                if index > 0 {
-                    if let Some(Message::Reasoning(reasoning)) = messages.get(index - 1) {
-                        if !reasoning.summary.is_empty() {
-                            reasoning_content = Some(reasoning.summary.clone());
-                        }
+                // The generic history keeps text and function calls as siblings.
+                // Chat Completions returned them in one assistant message; replay
+                // that message rather than inserting another assistant boundary.
+                let assistant_content = index.checked_sub(1).and_then(|previous| {
+                    if let Message::Assistant(assistant) = &messages[previous] {
+                        Some(assistant.content.clone())
+                    } else {
+                        None
+                    }
+                });
+                let reasoning_index = if assistant_content.is_some() {
+                    index.checked_sub(2)
+                } else {
+                    index.checked_sub(1)
+                };
+                if let Some(Message::Reasoning(reasoning)) =
+                    reasoning_index.and_then(|previous| messages.get(previous))
+                {
+                    if !reasoning.summary.is_empty() {
+                        reasoning_content = Some(reasoning.summary.clone());
                     }
                 }
 
@@ -345,11 +360,16 @@ fn openai_compatible_messages(
                     index += 1;
                 }
 
-                chat_messages.push(openai_compatible_tool_call_message_from_calls(
+                let mut message = openai_compatible_tool_call_message_from_calls(
                     tool_calls,
                     reasoning_content,
                     include_empty_tool_call_reasoning,
-                ));
+                );
+                if let Some(content) = assistant_content {
+                    chat_messages.pop(); // the adjacent text-only assistant sibling
+                    message["content"] = serde_json::Value::String(content);
+                }
+                chat_messages.push(message);
             }
             Message::ToolOutput(t) => {
                 chat_messages.extend(openai_compatible_tool_output_messages(t));
@@ -684,6 +704,181 @@ fn process_sse_data(data: &str) -> Vec<Result<ChunkType>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn assistant_text_and_parallel_calls_replay_as_one_wire_message() {
+        let first_args = "{ \"z\": 2, \"a\": 1 }";
+        let messages = vec![
+            Message::user("inspect"),
+            Message::reasoning(Some("rs_1".into()), "plan", None),
+            Message::assistant("  Checking both files.\n"),
+            Message::tool_call("call_1", "read", first_args),
+            Message::tool_call("call_2", "read", "{\"path\":\"second\"}"),
+            Message::tool_output("call_1", "read", "first", false),
+            Message::tool_output("call_2", "read", "second", false),
+            Message::assistant("Done."),
+        ];
+        let payload = openai_compatible_messages(&messages, false);
+        assert_eq!(payload.len(), 5);
+        assert_eq!(payload[1]["content"], "  Checking both files.\n");
+        assert_eq!(payload[1]["reasoning_content"], "plan");
+        assert_eq!(
+            payload[1]["tool_calls"][0]["function"]["arguments"],
+            first_args
+        );
+        assert_eq!(payload[1]["tool_calls"][1]["id"], "call_2");
+        assert_eq!(payload[2]["tool_call_id"], "call_1");
+        assert_eq!(payload[3]["tool_call_id"], "call_2");
+        assert_eq!(payload[4]["content"], "Done.");
+    }
+
+    #[test]
+    fn replay_grouping_never_merges_across_a_user_or_tool_result() {
+        let payload = openai_compatible_messages(
+            &[
+                Message::user("first"),
+                Message::assistant("earlier answer"),
+                Message::user("second"),
+                Message::tool_call("call_1", "read", "{}"),
+                Message::tool_output("call_1", "read", "result", false),
+                Message::tool_call("call_2", "read", "{}"),
+                Message::tool_output("call_2", "read", "next result", false),
+            ],
+            false,
+        );
+        assert_eq!(payload.len(), 7);
+        assert_eq!(payload[1]["content"], "earlier answer");
+        assert!(payload[1].get("tool_calls").is_none());
+        assert_eq!(payload[3]["tool_calls"][0]["id"], "call_1");
+        assert_eq!(payload[5]["tool_calls"][0]["id"], "call_2");
+        assert_eq!(payload[4]["tool_call_id"], "call_1");
+    }
+
+    #[tokio::test]
+    async fn tool_loop_replays_the_received_assistant_verbatim_on_the_wire() {
+        use crate::aisdk::response::stream_with_tools;
+        use crate::tool::{ToolExecute, ToolOutput};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let args = "{ \"z\": 2, \"a\": 1, \"note\": \"caf\\u00e9\" }";
+        let preamble = "  Inspecting the fixture.\n";
+        let expected_call = serde_json::json!({
+            "id": "call_original", "type": "function",
+            "function": {"name": "inspect", "arguments": args},
+        });
+        let expected_assistant = serde_json::json!({
+            "role": "assistant", "content": preamble, "tool_calls": [expected_call.clone()],
+        });
+        let first_stream = [
+            serde_json::json!({"choices":[{"delta":{"content":preamble},"finish_reason":null}]}),
+            serde_json::json!({"choices":[{"delta":{"tool_calls":[{
+                "index":0,"id":"call_original","type":"function",
+                "function":{"name":"inspect","arguments":args},
+            }]},"finish_reason":null}]}),
+            serde_json::json!({"choices":[{"delta":{},"finish_reason":"tool_calls"}]}),
+        ]
+        .into_iter()
+        .map(|value| format!("data: {value}\n\n"))
+        .collect::<String>()
+            + "data: [DONE]\n\n";
+        let final_stream = "data: {\"choices\":[{\"delta\":{\"content\":\"done\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let mut bodies = Vec::new();
+            for response in [first_stream, final_stream.to_string()] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0; 4096];
+                let body_start = loop {
+                    let count = socket.read(&mut buffer).await.unwrap();
+                    assert!(count > 0, "request closed before its headers");
+                    request.extend_from_slice(&buffer[..count]);
+                    if let Some(offset) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                        break offset + 4;
+                    }
+                };
+                let headers = std::str::from_utf8(&request[..body_start]).unwrap();
+                assert!(headers.starts_with("POST /v1/chat/completions "));
+                let length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (key, value) = line.split_once(':')?;
+                        key.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap();
+                while request.len() < body_start + length {
+                    let count = socket.read(&mut buffer).await.unwrap();
+                    assert!(count > 0, "request closed before its body");
+                    request.extend_from_slice(&buffer[..count]);
+                }
+                bodies.push(
+                    serde_json::from_slice::<serde_json::Value>(
+                        &request[body_start..body_start + length],
+                    )
+                    .unwrap(),
+                );
+                let headers = format!("HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n", response.len());
+                socket.write_all(headers.as_bytes()).await.unwrap();
+                socket.write_all(response.as_bytes()).await.unwrap();
+                socket.shutdown().await.unwrap();
+            }
+            bodies
+        });
+        let provider = OpenAICompatible::builder()
+            .base_url(format!("http://{address}/v1"))
+            .model_name("test")
+            .prompt_cache_key("same-session")
+            .build()
+            .unwrap();
+        let tool = Tool {
+            name: "inspect".into(),
+            description: "Read a fixture".into(),
+            input_schema: schemars::Schema::try_from(serde_json::json!({"type":"object"})).unwrap(),
+            transport: crate::tool::ToolTransport::ClientFunction,
+            execute: ToolExecute::new(|args| async move {
+                assert_eq!(args["z"], 2);
+                assert_eq!(args["a"], 1);
+                assert_eq!(args["note"], "café");
+                Ok(ToolOutput::new("fixture result"))
+            }),
+        };
+        let mut response = stream_with_tools(
+            provider,
+            vec![Message::user("inspect")],
+            vec![tool],
+            Some(2),
+            None,
+            HashMap::new(),
+            None,
+        )
+        .await
+        .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while let Some(chunk) = response.stream.next().await {
+                assert!(!matches!(chunk, ChunkType::Failed(_)), "{chunk:?}");
+            }
+        })
+        .await
+        .unwrap();
+        let bodies = server.await.unwrap();
+        assert_eq!(bodies[0]["prompt_cache_key"], bodies[1]["prompt_cache_key"]);
+        assert_eq!(bodies[0]["tools"], bodies[1]["tools"]);
+        let history = bodies[1]["messages"].as_array().unwrap();
+        let replayed_call = history
+            .iter()
+            .find_map(|message| message["tool_calls"].get(0))
+            .unwrap();
+        assert_eq!(
+            replayed_call, &expected_call,
+            "replay changed the model's tool arguments"
+        );
+        assert_eq!(history[1], expected_assistant);
+        assert_eq!(history.len(), 3);
+        assert_eq!(history[2]["tool_call_id"], "call_original");
+        assert_eq!(history[2]["content"], "fixture result");
+    }
 
     fn tool_call_chunks(data: &str) -> Vec<String> {
         process_sse_data(data)
