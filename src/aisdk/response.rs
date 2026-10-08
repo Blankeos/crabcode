@@ -785,7 +785,9 @@ pub async fn stream_with_tools_options<P: Provider>(
                 messages_arc.lock().await.extend(reasoning_messages);
             }
 
-            let assistant_text = accumulated_text.trim().to_string();
+            // Preserve response bytes in replay; even harmless normalization
+            // changes a provider's conversation/cache prefix.
+            let assistant_text = accumulated_text;
             if !assistant_text.is_empty() {
                 let assistant_msg = Message::assistant(&assistant_text);
                 current_messages.push(assistant_msg.clone());
@@ -890,7 +892,7 @@ pub async fn stream_with_tools_options<P: Provider>(
                 let call_id = tool_call.call_id;
                 let tool_name = tool_call.name;
                 let args = tool_call.arguments;
-                let arguments = canonical_json(&args);
+                let arguments = tool_call.arguments_json;
                 let tool_call_message = if accumulated_reasoning.is_empty() {
                     if let Some(item_id) = tool_call.item_id {
                         Message::tool_call_with_item_id(
@@ -1676,6 +1678,9 @@ struct CompletedToolCall {
     call_id: String,
     name: String,
     arguments: serde_json::Value,
+    /// Validated original JSON for faithful history replay. Canonical JSON is
+    /// only for fingerprints, never a replacement for provider output.
+    arguments_json: String,
 }
 
 #[derive(Debug)]
@@ -1752,7 +1757,7 @@ impl ToolCallAccumulator {
                 .clone()
                 .or_else(|| item_id.clone())
                 .unwrap_or_else(|| call.key.clone());
-            let args =
+            let (args, arguments_json) =
                 parse_tool_arguments(&call_id, &call.arguments, call.final_arguments.as_deref())?;
 
             results.push(CompletedToolCall {
@@ -1760,6 +1765,7 @@ impl ToolCallAccumulator {
                 call_id,
                 name,
                 arguments: args,
+                arguments_json,
             });
         }
 
@@ -1857,17 +1863,19 @@ fn parse_tool_arguments(
     id: &str,
     streamed_arguments: &str,
     final_arguments: Option<&str>,
-) -> std::result::Result<serde_json::Value, String> {
+) -> std::result::Result<(serde_json::Value, String), String> {
     let streamed = streamed_arguments.trim();
 
     if !streamed.is_empty() {
         match serde_json::from_str(streamed_arguments) {
-            Ok(value) => return Ok(value),
+            Ok(value) => return Ok((value, streamed_arguments.to_string())),
             Err(streamed_err) => {
                 if let Some(final_arguments) = final_arguments {
                     let final_trimmed = final_arguments.trim();
                     if !final_trimmed.is_empty() {
-                        return serde_json::from_str(final_arguments).map_err(|final_err| {
+                        return serde_json::from_str(final_arguments)
+                            .map(|value| (value, final_arguments.to_string()))
+                            .map_err(|final_err| {
                             format!(
                                 "Tool call '{}' arguments are incomplete or invalid JSON: {}; final arguments were also invalid: {}",
                                 id, streamed_err, final_err
@@ -1885,20 +1893,28 @@ fn parse_tool_arguments(
     }
 
     let Some(final_arguments) = final_arguments else {
-        return Ok(serde_json::Value::Object(Default::default()));
+        return Ok((
+            serde_json::Value::Object(Default::default()),
+            "{}".to_string(),
+        ));
     };
 
     let final_trimmed = final_arguments.trim();
     if final_trimmed.is_empty() {
-        return Ok(serde_json::Value::Object(Default::default()));
+        return Ok((
+            serde_json::Value::Object(Default::default()),
+            "{}".to_string(),
+        ));
     }
 
-    serde_json::from_str(final_arguments).map_err(|e| {
-        format!(
-            "Tool call '{}' arguments are incomplete or invalid JSON: {}",
-            id, e
-        )
-    })
+    serde_json::from_str(final_arguments)
+        .map(|value| (value, final_arguments.to_string()))
+        .map_err(|e| {
+            format!(
+                "Tool call '{}' arguments are incomplete or invalid JSON: {}",
+                id, e
+            )
+        })
 }
 
 fn tool_call_key(item: &serde_json::Value, array_index: usize) -> String {
@@ -4486,6 +4502,33 @@ mod tests {
             .expect("provider should receive failed tool observation");
         assert!(follow_up.contains("Tool 'edit' error"));
         assert!(follow_up.contains("Could not find text to replace"));
+    }
+
+    #[test]
+    fn validated_tool_arguments_preserve_selected_json_for_replay() {
+        for raw in [
+            " { \"z\": 2, \"a\": \"caf\\u00e9\" } ",
+            "1e2",
+            "null",
+            "[ 1, 2 ]",
+        ] {
+            let (value, replay) = super::parse_tool_arguments("call_1", raw, None).unwrap();
+            assert_eq!(replay, raw);
+            assert_eq!(
+                value,
+                serde_json::from_str::<serde_json::Value>(raw).unwrap()
+            );
+        }
+        let final_json = " { \"path\": \"src/lib.rs\" } ";
+        for streamed in ["", "  ", "{\"path\":"] {
+            let (_, replay) =
+                super::parse_tool_arguments("call_1", streamed, Some(final_json)).unwrap();
+            assert_eq!(replay, final_json);
+        }
+        let (value, replay) = super::parse_tool_arguments("call_1", " ", None).unwrap();
+        assert_eq!(value, serde_json::json!({}));
+        assert_eq!(replay, "{}");
+        assert!(super::parse_tool_arguments("call_1", "{", Some("also invalid")).is_err());
     }
 
     #[test]

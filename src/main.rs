@@ -394,10 +394,14 @@ async fn run_print_mode(
     no_session_persistence: bool,
     dangerously_skip_permissions: bool,
     cli_agent: Option<&str>,
+    trace_path: Option<&std::path::Path>,
 ) -> Result<()> {
     use crate::llm::client::stream_llm_with_cancellation;
     use crate::session::types::Message;
     use tokio::sync::mpsc;
+
+    let mut trace = crate::llm::diagnostics::PrintTrace::create(trace_path)
+        .context("Could not create print-mode trace (destination must be a new file)")?;
 
     // Load config and model preferences
     let loaded_config = crate::config::ConfigLoader::load()?;
@@ -465,6 +469,16 @@ async fn run_print_mode(
                 Some(resolved)
             }
         });
+
+    if let Some(trace) = trace.as_mut() {
+        trace.record(serde_json::json!({
+            "event": "model",
+            "provider": provider_name,
+            "model": model_id,
+            "requested_effort": requested_reasoning.map(|effort| effort.as_str()),
+            "sent_effort": reasoning_effort.map(|effort| effort.as_str()),
+        }))?;
+    }
 
     let is_git_repo = crate::utils::git::is_git_repo(&cwd).unwrap_or(false);
 
@@ -549,6 +563,11 @@ async fn run_print_mode(
 
     let mut output = PrintOutput::default();
     while let Some(chunk) = receiver.recv().await {
+        if let Some(error) = trace.as_mut().and_then(|trace| trace.observe(&chunk).err()) {
+            // Telemetry must never interrupt an agent with tools still running.
+            eprintln!("Warning: print-mode trace disabled after write failure: {error}");
+            trace = None;
+        }
         if let Some(commentary) = output.observe(&chunk) {
             eprintln!("{commentary}");
         }
@@ -557,6 +576,7 @@ async fn run_print_mode(
             | crate::llm::ChunkMessage::ToolCalls(_)
             | crate::llm::ChunkMessage::ToolResult(_)
             | crate::llm::ChunkMessage::Metrics { .. }
+            | crate::llm::ChunkMessage::Diagnostic(_)
             | crate::llm::ChunkMessage::Cancelled
             | crate::llm::ChunkMessage::Reasoning(_)
             | crate::llm::ChunkMessage::Usage(_)
@@ -760,6 +780,15 @@ pub(crate) struct Args {
     /// Run non-interactively (final answer on stdout, tool-step commentary on stderr)
     #[arg(short = 'p', long = "print")]
     print_mode: bool,
+
+    /// Write content-free timing/tool/usage events as JSONL (local print mode only)
+    #[arg(
+        long = "trace-jsonl",
+        value_name = "PATH",
+        requires = "print_mode",
+        conflicts_with = "attach"
+    )]
+    trace_jsonl: Option<PathBuf>,
 
     /// Attach print mode or interactive attach to a remote crabcode host
     #[arg(long = "attach", value_name = "URL_OR_ALIAS")]
@@ -1223,6 +1252,7 @@ async fn main() -> Result<()> {
             args.no_session_persistence,
             args.dangerously_skip_permissions,
             args.agent.as_deref(),
+            args.trace_jsonl.as_deref(),
         )
         .await;
     }
@@ -1318,6 +1348,26 @@ async fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn trace_jsonl_requires_local_print_mode() {
+        let args =
+            Args::try_parse_from(["crabcode", "-p", "--trace-jsonl", "trace.jsonl", "hi"]).unwrap();
+        assert_eq!(args.trace_jsonl, Some(PathBuf::from("trace.jsonl")));
+        assert_eq!(args.prompt, vec!["hi"]);
+        assert!(Args::try_parse_from(["crabcode", "--trace-jsonl", "trace.jsonl"]).is_err());
+        assert!(Args::try_parse_from([
+            "crabcode",
+            "-p",
+            "--attach",
+            "http://127.0.0.1:8421",
+            "--trace-jsonl",
+            "trace.jsonl",
+            "hi"
+        ])
+        .is_err());
+        assert!(root_help().unwrap().contains("--trace-jsonl"));
+    }
+
     use super::*;
 
     #[test]
@@ -1354,6 +1404,37 @@ mod tests {
         assert!(help.contains("--dangerously-skip-permissions"));
         assert!(help.contains("yolo"));
         assert!(help.contains("Explicit denies still apply"));
+    }
+
+    #[test]
+    fn print_output_never_includes_diagnostic_or_usage_events() {
+        use crate::llm::ChunkMessage;
+        let mut output = PrintOutput::default();
+        assert!(output
+            .observe(&ChunkMessage::Text("final answer".into()))
+            .is_none());
+        for chunk in [
+            ChunkMessage::Diagnostic(
+                serde_json::json!({ "event": "provider_step_start", "step": 1 }),
+            ),
+            ChunkMessage::Usage(crate::aisdk::chunk::TokenUsage {
+                input: 10,
+                output: 3,
+                cache_read: 0,
+                cache_write: 0,
+            }),
+            ChunkMessage::Metrics {
+                token_count: 42,
+                duration_ms: 100,
+                usage: None,
+                cost: None,
+            },
+        ] {
+            assert!(output.observe(&chunk).is_none());
+            assert_eq!(output.pending, "final answer");
+        }
+        output.observe(&ChunkMessage::End);
+        assert_eq!(output.pending, "final answer");
     }
 
     #[test]
