@@ -35,7 +35,7 @@ gen-themes *args:
     bun run scripts/gen-themes.ts {{ args }}
 
 [doc("""
-  Agent self-eval benchmarks (crabcode / opencode / codex / grok-build).
+  Agent self-eval benchmarks (crabcode / opencode / codex / grok-build; Claude opt-in).
 
   Pass-through args to scripts/bench-agents.ts. Reports → benchmark-reports/
 
@@ -48,12 +48,18 @@ gen-themes *args:
   just bench-agents --list-tasks
   just bench-agents --estimate
   just bench-agents --help
+  just bench-agents --agents claude --claude-model claude-sonnet-5-5 --tasks bugfix-js
+  just bench-agents --agents crabcode,claude --model '<provider>/claude-sonnet-5-5' --claude-model claude-sonnet-5-5 --tasks workflow-runner --tool-profile coding --diagnostics --timeout-ms 300000
 
   Crabcode reasoning: BENCH_CRABCODE_REASONING (default medium).
   OpenAI model ids may fail on grok-build — use an xAI model or drop it from --agents.
 """)]
 bench-agents *args:
     bun run scripts/bench-agents.ts {{ args }}
+
+[doc('Test deterministic agent benchmark runners and fixtures without model calls')]
+test-bench:
+    bun test benchmarking
 
 [doc("""
   Startup + idle-CPU perf vs peer CLIs.
