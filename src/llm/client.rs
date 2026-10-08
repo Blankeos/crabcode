@@ -791,6 +791,7 @@ pub async fn stream_llm_with_cancellation(
         agent_max_steps,
     );
     log_stream_request(primary_log_context, &request_config);
+    send_request_diagnostic(&sender, &request_config);
 
     let mut response = stream_provider_request(
         &request_config,
@@ -805,8 +806,9 @@ pub async fn stream_llm_with_cancellation(
     let mut token_count: usize = 0;
     let pricing = request_config.pricing.clone();
 
+    let primary_stream: &mut LanguageModelStream = &mut response.stream;
     let relay_result = match relay_stream_to_sender(
-        &mut response.stream,
+        primary_stream,
         &cancel_token,
         &sender,
         &mut token_count,
@@ -889,6 +891,7 @@ pub async fn stream_llm_with_cancellation(
         None,
     );
     log_stream_request(summary_log_context, &summary_config);
+    send_request_diagnostic(&sender, &summary_config);
 
     let mut summary_response = stream_provider_request(
         &summary_config,
@@ -2014,6 +2017,15 @@ pub(crate) fn openai_request_instructions(
     (!parts.is_empty()).then(|| parts.join("\n\n---\n\n"))
 }
 
+fn send_request_diagnostic(sender: &crate::llm::ChunkSender, config: &ProviderRequestConfig) {
+    let _ = sender.send(crate::llm::ChunkMessage::Diagnostic(serde_json::json!({
+        "event": "request_config",
+        "provider": config.provider_name,
+        "model": config.model_name,
+        "sent_effort": config.reasoning_effort.map(|effort| effort.as_str()),
+    })));
+}
+
 fn log_stream_request(context: StreamLogContext<'_>, config: &ProviderRequestConfig) {
     if !crate::logging::enabled() {
         return;
@@ -2093,7 +2105,7 @@ fn is_transport_or_request_error(err: &str) -> bool {
 }
 
 async fn relay_stream_to_sender(
-    stream: &mut LanguageModelStream,
+    stream: &mut (impl futures::Stream<Item = ChunkType> + Unpin),
     cancel_token: &CancellationToken,
     sender: &crate::llm::ChunkSender,
     token_count: &mut usize,
@@ -2105,6 +2117,7 @@ async fn relay_stream_to_sender(
 ) -> Result<StreamRelayResult, DynError> {
     let mut stats = RelayStats::default();
     let mut stream_usage = None;
+    let mut tool_activity_sent = false;
     crate::emit_log!(
         "[RELAY] relay_stream_to_sender started {}",
         context.describe()
@@ -2160,6 +2173,12 @@ async fn relay_stream_to_sender(
                 stats.record_chunk("ReasoningItem", elapsed_ms);
             }
             ChunkType::ToolCall(tool_call) => {
+                if !tool_activity_sent {
+                    let _ = sender.send(crate::llm::ChunkMessage::Diagnostic(serde_json::json!({
+                        "event": "response_activity", "kind": "tool_call",
+                    })));
+                    tool_activity_sent = true;
+                }
                 let elapsed_ms = start_time.elapsed().as_millis();
                 stats.record_chunk("ToolCall", elapsed_ms);
                 stats.tool_call_chunks += 1;
@@ -2193,6 +2212,9 @@ async fn relay_stream_to_sender(
                 }
             }
             ChunkType::End { reason } => {
+                let _ = sender.send(crate::llm::ChunkMessage::Diagnostic(serde_json::json!({
+                    "event": "provider_end", "reason": "stream_end",
+                })));
                 let elapsed_ms = start_time.elapsed().as_millis();
                 stats.record_chunk("End", elapsed_ms);
                 let reason = reason
@@ -2219,6 +2241,9 @@ async fn relay_stream_to_sender(
                 });
             }
             ChunkType::ResponseCompleted { end_turn, .. } => {
+                let _ = sender.send(crate::llm::ChunkMessage::Diagnostic(serde_json::json!({
+                    "event": "provider_end", "reason": "response_completed",
+                })));
                 let elapsed_ms = start_time.elapsed().as_millis();
                 stats.record_chunk("ResponseCompleted", elapsed_ms);
                 stats.response_completed_chunks += 1;
@@ -2251,6 +2276,12 @@ async fn relay_stream_to_sender(
                 let elapsed_ms = start_time.elapsed().as_millis();
                 stats.record_chunk("Metadata", elapsed_ms);
                 stats.record_metadata(&message);
+                if let Some(event) = super::diagnostics::metadata_event(&message) {
+                    if event["event"] == "provider_step_start" {
+                        tool_activity_sent = false;
+                    }
+                    let _ = sender.send(crate::llm::ChunkMessage::Diagnostic(event));
+                }
                 crate::emit_log!("[RELAY] Metadata {}", message);
             }
             ChunkType::Usage(usage) => {
@@ -2939,6 +2970,55 @@ fn normalize_anthropic_base_url(base_url: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn print_diagnostics_relay_safe_boundaries_and_actual_effort() {
+        let config = test_request_config(Some("SECRET_KEY".into()));
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        super::send_request_diagnostic(&sender, &config);
+        let mut stream = futures::stream::iter(vec![
+            ChunkType::Metadata("provider_step_start step=1 messages=2 tools=1 message_text_bytes=40".into()),
+            ChunkType::Reasoning("private reasoning".into()),
+            ChunkType::ToolCall("PRIVATE_ARGUMENTS".into()),
+            ChunkType::Metadata("provider_finish_reason=tool_calls".into()),
+            ChunkType::Metadata("provider_step_finish step=1 has_tool_call=false action=finish preview=SECRET_CONTENT".into()),
+            ChunkType::Text("answer".into()),
+            ChunkType::End { reason: None },
+        ]);
+        super::relay_stream_to_sender(
+            &mut stream,
+            &tokio_util::sync::CancellationToken::new(),
+            &sender,
+            &mut 0,
+            &std::time::Instant::now(),
+            super::StreamLogContext::new("primary", &config, 2, 1, None),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let mut events = Vec::new();
+        while let Ok(chunk) = receiver.try_recv() {
+            if let crate::llm::ChunkMessage::Diagnostic(event) = chunk {
+                events.push(event);
+            }
+        }
+        assert_eq!(events[0]["event"], "request_config");
+        assert!(events[0]["sent_effort"].is_null());
+        assert_eq!(events[1]["event"], "provider_step_start");
+        assert_eq!(events[2]["event"], "response_activity");
+        assert_eq!(events[3]["event"], "provider_end");
+        let serialized = serde_json::to_string(&events).unwrap();
+        for private in [
+            "SECRET_KEY",
+            "private reasoning",
+            "PRIVATE_ARGUMENTS",
+            "SECRET_CONTENT",
+        ] {
+            assert!(!serialized.contains(private));
+        }
+    }
+
     use super::{
         apply_compaction_stream_chunk, apply_provider_request_defaults, btw_context_messages,
         convert_messages, convert_messages_for_model, convert_messages_for_model_with_audio,
