@@ -19,7 +19,7 @@ A purely Rust-based AI CLI coding agent with a beautiful terminal UI for interac
 - **Terminal UI (TUI)** - Beautiful, responsive interface built with [ratatui](https://github.com/ratatui-org/ratatui)
 - **Built for the OpenCode user** - works out of the box w/ opencode themes, every UX, and some existing configs so you don't need to force your team to use crabcode.
   - **Same UX** - carefully ported most of the good UX from OpenCode i.e. shortcuts, etc.
-  - **Agent System** - Switch between PLAN (read-only analysis) and BUILD (implementation) agents with TAB, and custom agents.
+  - **Agent System** - Switch between PLAN (read-only analysis) and BUILD (implementation) agents with Shift+Tab, and custom agents.
   - **Multiple Model Support** - Works w/ the same models.dev support.
   - **Command System** - Intuitive commands: `/sessions`, `/new`, `/connect`, `/models`, `/exit` + custom commands.
   - **Session Management** - Create and manage multiple chat sessions

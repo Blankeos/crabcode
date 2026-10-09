@@ -277,7 +277,7 @@ pub fn render_home(
         help_text.push(Span::raw("  "));
     }
     help_text.extend([
-        Span::styled("tab", Style::default().fg(colors.info)),
+        Span::styled("shift-tab", Style::default().fg(colors.info)),
         Span::raw(" agents  "),
         Span::styled("ctrl+p", Style::default().fg(colors.info)),
         Span::raw(" commands"),
@@ -405,8 +405,8 @@ mod tests {
             let area = hitbox.unwrap();
             assert_eq!(text_in(&buffer, area), label);
             assert_eq!(area.height, 1);
-            let suffix = Rect::new(area.right(), area.y, 29, 1);
-            assert_eq!(text_in(&buffer, suffix), "  tab agents  ctrl+p commands");
+            let suffix = Rect::new(area.right(), area.y, 35, 1);
+            assert_eq!(text_in(&buffer, suffix), "  shift-tab agents  ctrl+p commands");
             let colors = crate::theme::Theme::load_builtin_default().get_colors(true);
             assert_eq!(buffer[(area.x, area.y)].fg, colors.warning);
             assert!(buffer[(area.x, area.y)].modifier.contains(Modifier::BOLD));

@@ -3912,6 +3912,20 @@ impl App {
             return;
         }
 
+        // Shift+Tab cycles primary agents (OpenCode v2). It has to run before the
+        // suggestions popup, which treats plain Tab as autocomplete. Kitty reports
+        // this as Tab+Shift; classic terminals report BackTab.
+        if matches!(
+            self.overlay_focus,
+            OverlayFocus::None | OverlayFocus::SuggestionsPopup
+        ) && (key.code == KeyCode::BackTab
+            || (key.code == KeyCode::Tab && key.modifiers.contains(event::KeyModifiers::SHIFT)))
+        {
+            self.toggle_agent_mode();
+            self.record_overlay_close_after_key(overlay_before_key);
+            return;
+        }
+
         // ctrl-t / ctrl-x must work while slash suggestions are open (e.g. `/compact|`).
         if key.code == KeyCode::Char('t')
             && key.modifiers == event::KeyModifiers::CONTROL
@@ -4781,10 +4795,6 @@ impl App {
                     && self.should_handle_child_session_arrow() =>
             {
                 self.switch_to_parent_session()
-            }
-            KeyCode::Tab => {
-                self.toggle_agent_mode();
-                true
             }
             KeyCode::Esc => {
                 // If text is selected, clear selection first
@@ -14503,6 +14513,21 @@ mod tests {
         assert_eq!(app.agent, "Designer");
         app.toggle_agent_mode();
         assert_eq!(app.agent, "Plan");
+    }
+
+    #[test]
+    fn shift_tab_cycles_primary_agents_and_plain_tab_does_not() {
+        let mut app = test_app();
+        assert_eq!(app.agent, "Build");
+
+        app.handle_keys(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.agent, "Build");
+
+        app.handle_keys(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT));
+        assert_eq!(app.agent, "Plan");
+
+        app.handle_keys(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE));
+        assert_eq!(app.agent, "Build");
     }
 
     #[tokio::test]

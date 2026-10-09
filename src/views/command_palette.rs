@@ -366,7 +366,7 @@ fn core_palette_items(
             "Agent Cycle",
             "Agent",
             "Cycle through primary agents",
-            Some("tab"),
+            Some("shift-tab"),
             &[],
         ),
     );
