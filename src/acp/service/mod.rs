@@ -1,14 +1,26 @@
+mod attachment_storage;
 mod attachments;
+mod command_expansion;
 mod commands;
 mod compaction;
+mod compaction_summary;
 mod config;
+mod context;
+mod mcp_config;
+mod models;
+mod modes;
 mod notifications;
+mod permission_preview;
 mod permissions;
 mod prompt;
 mod questions;
+mod replay;
 mod sessions;
 mod stream;
 mod terminals;
+mod tool_content;
+mod tool_locations;
+mod transcript;
 mod usage;
 
 #[cfg(test)]

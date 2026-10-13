@@ -1,12 +1,12 @@
-use super::config::merge_acp_mcp_servers;
-use super::config::model_context_window;
-use super::config::model_reasoning;
-use super::config::resolve_model;
 use super::config::session_config_options;
-use super::config::session_modes;
 use super::internal_error;
-use super::notifications::replay_messages;
+use super::mcp_config::merge_acp_mcp_servers;
+use super::models::model_context_window;
+use super::models::model_reasoning;
+use super::models::resolve_model;
+use super::modes::session_modes;
 use super::permissions::configured_tool_permissions;
+use super::replay::replay_messages;
 use super::AcpService;
 use super::AcpSession;
 use agent_client_protocol::schema::v1::ListSessionsResponse;
@@ -360,52 +360,5 @@ impl AcpService {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::path::Path;
-
-    #[test]
-    fn session_info_includes_hierarchy_metadata() {
-        let now = std::time::SystemTime::now();
-        let info = acp_session_info(
-            crate::session::manager::SessionInfo {
-                id: "child".to_string(),
-                parent_id: Some("parent".to_string()),
-                title: "Child".to_string(),
-                created_at: now,
-                updated_at: now,
-                message_count: 0,
-                workspace_id: 1,
-                workspace_path: "/tmp".to_string(),
-                workspace_name: "tmp".to_string(),
-                workspace_sort_order: 0,
-                status: crate::session::types::SessionStatus::Idle,
-                pinned_at: None,
-                archived_at: None,
-            },
-            Some("root".to_string()),
-        );
-        let meta = info.meta.expect("session metadata");
-        assert_eq!(meta["crabcode"]["parentSessionId"], "parent");
-        assert_eq!(meta["crabcode"]["rootSessionId"], "root");
-    }
-
-    #[test]
-    fn session_list_cursor_pages_all_sessions() {
-        assert_eq!(
-            session_page(None, 250).unwrap(),
-            (0, 100, Some("100".to_string()))
-        );
-        assert_eq!(
-            session_page(Some("100"), 250).unwrap(),
-            (100, 200, Some("200".to_string()))
-        );
-        assert_eq!(session_page(Some("200"), 250).unwrap(), (200, 250, None));
-        assert!(session_page(Some("invalid"), 250).is_err());
-    }
-
-    #[test]
-    fn rejects_non_absolute_workspaces() {
-        assert!(workspace_path(Path::new("relative")).is_err());
-    }
-}
+#[path = "tests/sessions.rs"]
+mod tests;

@@ -1,5 +1,5 @@
 use super::cancellable;
-use super::notifications::absolute_tool_path;
+use super::tool_locations::absolute_tool_path;
 use agent_client_protocol::schema::v1::CreateTerminalRequest;
 use agent_client_protocol::schema::v1::KillTerminalRequest;
 use agent_client_protocol::schema::v1::ReleaseTerminalRequest;
@@ -205,9 +205,12 @@ mod tests {
     use agent_client_protocol::schema::v1::CreateTerminalRequest;
     use agent_client_protocol::schema::v1::KillTerminalRequest;
     use agent_client_protocol::schema::v1::ReleaseTerminalRequest;
+
     use agent_client_protocol::Client;
     use agent_client_protocol::ConnectionTo;
+
     use std::path::Path;
+
     use tokio_util::sync::CancellationToken;
 
     #[test]
