@@ -488,6 +488,7 @@ fn advertises_and_dispatches_commands_over_stdio() {
         serde_json::json!({
             "model": "offline/chat",
             "enabled_providers": ["offline"],
+            "agent": {"compaction": {"mode": "primary"}},
             "provider": {"offline": {
                 "npm": "@ai-sdk/openai-compatible",
                 "options": {"apiKey": "dummy"},
@@ -534,6 +535,28 @@ Wire skill instructions.
         }
     }));
     let (new_session, mut notifications) = process.recv_response(2);
+    let expected_description =
+        "Compaction agent. Summarizes conversation context for continued work.";
+    let compaction_mode = new_session["result"]["modes"]["availableModes"]
+        .as_array()
+        .expect("available modes")
+        .iter()
+        .find(|mode| mode["id"] == "compaction")
+        .expect("compaction mode");
+    assert_eq!(compaction_mode["description"], expected_description);
+    let mode_config = new_session["result"]["configOptions"]
+        .as_array()
+        .expect("config options")
+        .iter()
+        .find(|option| option["id"] == "mode")
+        .expect("mode config");
+    let compaction_option = mode_config["options"]
+        .as_array()
+        .expect("mode options")
+        .iter()
+        .find(|option| option["value"] == "compaction")
+        .expect("compaction option");
+    assert_eq!(compaction_option["description"], expected_description);
     let session_id = new_session["result"]["sessionId"]
         .as_str()
         .expect("session id")
