@@ -36,6 +36,8 @@ cargo install crabcode             # or cargo (build from source)
 curl -sSL https://raw.githubusercontent.com/Blankeos/crabcode/main/install.sh | sh # or linux/macos (via curl)
 ```
 
+The shell installer downloads a prebuilt release, verifies its SHA256 checksum, and installs to `~/.local/bin`. Set `CRABCODE_INSTALL_DIR` for a different destination, or pass a version with `sh -s -- 0.0.14`. Installation and upgrades use compact version labels and amber progress in a terminal; redirected output stays plain.
+
 ### Upgrade
 
 Detects how you installed (brew / npm / bun / cargo / install.sh) and upgrades in place:
