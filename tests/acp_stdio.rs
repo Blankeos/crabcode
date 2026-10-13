@@ -663,6 +663,12 @@ fn automatically_compacts_provider_usage_over_stdio() {
     std::fs::write(workspace.path().join("AGENTS.md"), system_marker).unwrap();
     // Request-time provider discovery also reads the process working directory.
     let mut process = AcpProcess::spawn_with_working_directory(workspace.path(), workspace.path());
+    // Empty auth storage enables runtime-provider discovery; this fixture uses only mock.
+    std::fs::write(
+        process._state.path().join("crabcode/auth.json"),
+        serde_json::json!({"mock": {"type": "api", "key": "dummy"}}).to_string(),
+    )
+    .expect("mock auth fixture");
     assert!(initialize(&mut process).get("error").is_none());
     process.send(serde_json::json!({
         "jsonrpc": "2.0", "id": 2, "method": "session/new",
