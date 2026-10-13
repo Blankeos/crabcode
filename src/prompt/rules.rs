@@ -225,6 +225,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn prompt_includes_both_project_and_global_rules() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        let config_dir = root.path().join("config");
+        let local_path = project.join("AGENTS.md");
+        let global_path = config_dir.join("crabcode/AGENTS.md");
+        write_file(&local_path, "local-rule-marker");
+        write_file(&global_path, "global-rule-marker");
+
+        let rules = resolve_rules(
+            &project,
+            ResolveOptions {
+                config_dir: Some(config_dir),
+                home_dir: None,
+                disable_claude_code: false,
+                disable_claude_code_prompt: false,
+                max_bytes: 1024,
+            },
+        )
+        .await;
+        let prompt = format_rules_for_prompt(&rules);
+
+        assert!(prompt.contains(&format!(
+            "Instructions from: {}",
+            display_path_best_effort(&local_path)
+        )));
+        assert!(prompt.contains(&format!(
+            "Instructions from: {}",
+            display_path_best_effort(&global_path)
+        )));
+        assert_eq!(prompt.matches("local-rule-marker").count(), 1);
+        assert_eq!(prompt.matches("global-rule-marker").count(), 1);
+    }
+
+    #[tokio::test]
     async fn upward_traversal_finds_parent_rules() {
         let root = unique_temp_dir("rules2");
         let child = root.join("a").join("b");

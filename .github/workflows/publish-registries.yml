@@ -22,6 +22,7 @@ jobs:
     outputs:
       tag: ${{ steps.release.outputs.tag }}
       version: ${{ steps.release.outputs.version }}
+      assets: ${{ steps.release.outputs.assets }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -59,8 +60,34 @@ jobs:
             exit 1
           fi
 
-          echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
+          # Read the tagged release's config, not a second hard-coded target/format list.
+          # Defaults match cargo-dist so manual publishing also works for older tags.
+          assets="$(python3 - <<'PY'
+          import json
+          import tomllib
+
+          with open("dist-workspace.toml", "rb") as file:
+              dist = tomllib.load(file)["dist"]
+          with open("Cargo.toml", "rb") as file:
+              name = tomllib.load(file)["package"]["name"]
+
+          targets = dist["targets"]
+          if not targets:
+              raise SystemExit("No release targets configured")
+          assets = []
+          for target in targets:
+              windows = "windows" in target.split("-")
+              extension = dist.get("windows-archive" if windows else "unix-archive", ".zip" if windows else ".tar.xz")
+              assets.append(f"{name}-{target}{extension}")
+          print(json.dumps(assets, separators=(",", ":")))
+          PY
+          )"
+
+          {
+            echo "tag=$RELEASE_TAG"
+            echo "version=$version"
+            echo "assets=$assets"
+          } >> "$GITHUB_OUTPUT"
 
   # Shared gate: do not publish crates.io or npm until cargo-dist release builds finish.
   wait-for-binaries:
@@ -71,22 +98,27 @@ jobs:
       - name: Wait for GitHub release binaries
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          RELEASE_REPO: ${{ github.repository }}
+          RELEASE_ASSETS: ${{ needs.prepare.outputs.assets }}
         shell: bash
         run: |
           set -euo pipefail
-          expected_assets=(
-            crabcode-aarch64-apple-darwin.tar.xz
-            crabcode-aarch64-unknown-linux-gnu.tar.xz
-            crabcode-x86_64-apple-darwin.tar.xz
-            crabcode-x86_64-unknown-linux-gnu.tar.xz
-            crabcode-x86_64-pc-windows-msvc.zip
-          )
+          expected_names="$(jq -er 'if type == "array" and length > 0 then .[] else error("No release assets configured") end' <<< "$RELEASE_ASSETS")"
+          expected_assets=()
+          while IFS= read -r asset; do
+            expected_assets+=("$asset")
+          done <<< "$expected_names"
 
           for attempt in {1..120}; do
-            assets="$(gh release view "${{ needs.prepare.outputs.tag }}" \
-              --repo "${{ github.repository }}" \
+            if ! assets="$(gh release view "$RELEASE_TAG" \
+              --repo "$RELEASE_REPO" \
               --json assets \
-              --jq '.assets[].name' 2>/dev/null || true)"
+              --jq '.assets[].name')"; then
+              echo "Unable to fetch GitHub release assets (attempt $attempt/120)"
+              sleep 30
+              continue
+            fi
             missing=()
 
             for asset in "${expected_assets[@]}"; do

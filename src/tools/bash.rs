@@ -112,9 +112,7 @@ impl BashTool {
         cmd.kill_on_drop(true);
 
         #[cfg(unix)]
-        {
-            cmd.process_group(0);
-        }
+        crate::utils::process::detach_from_terminal(cmd.as_std_mut());
 
         let mut child = cmd
             .spawn()

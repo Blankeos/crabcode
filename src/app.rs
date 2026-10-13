@@ -17,7 +17,6 @@ use crate::autocomplete::AutoComplete;
 use crate::command::handlers::register_all_commands;
 use crate::command::parser::InputType;
 use crate::command::registry::Registry;
-use crate::llm::client::stream_llm_with_cancellation;
 use crate::session::manager::SessionManager;
 use crate::tools::{PermissionResponse, ToolHandler};
 
@@ -25,10 +24,11 @@ use crate::push_toast;
 use crate::toast::{self, Toast, ToastAction, ToastLevel};
 use crate::ui::components::action_dialog::{ActionDialog, ActionDialogEvent, ActionDialogItem};
 use crate::ui::components::chat::{Chat, ChatImageTarget};
+use crate::ui::components::file_actions::{FileAction, FileActionEvent, FileActions};
 use crate::ui::components::find::{FindBar, FindBarAction};
 use crate::ui::components::input::Input;
 use crate::ui::components::popup::Popup;
-use crate::ui::hyperlink::HyperlinkTarget;
+use crate::ui::hyperlink::{FileHyperlinkTarget, HyperlinkTarget};
 use crate::utils::git;
 
 use crate::tools::TerminalSessionEvent;
@@ -928,6 +928,7 @@ pub struct App {
     pub message_actions_dialog: Option<ActionDialog>,
     message_actions_return_focus: OverlayFocus,
     selection_action_bar: Option<SelectionActionBarState>,
+    file_actions: Option<FileActions>,
     pending_chat_message_click: Option<usize>,
     pub api_key_input: crate::ui::components::api_key_input::ApiKeyInput,
     provider_oauth_receiver: Option<tokio::sync::mpsc::UnboundedReceiver<ProviderOAuthTaskMessage>>,
@@ -982,10 +983,10 @@ pub struct App {
     pub theme_transparent: bool,
     pub sounds: crate::sound::ResolvedSoundsConfig,
     pub notifications: crate::config::NotificationsConfig,
-    pub images: crate::config::ImagesConfig,
     pub editor: crate::config::EditorConfig,
     pending_editor_suspend: Option<String>,
     pub websearch: crate::config::configuration::WebsearchConfig,
+    compaction: crate::config::configuration::CompactionConfig,
     pub mcp: crate::config::configuration::McpConfig,
     mcp_manager: Option<std::sync::Arc<tokio::sync::Mutex<crate::mcp::McpManager>>>,
     mcp_summary: crate::views::home::McpSummary,
@@ -1015,7 +1016,7 @@ pub struct App {
     discovery: Option<crate::model::discovery::Discovery>,
     cached_usage_text: String,
     cached_usage_check: (usize, u64, usize),
-    cached_usage_streaming_base: Option<StreamingUsageBase>,
+    cached_usage_streaming_base: crate::session::context::StreamingContextTokens,
     terminal_title_enabled: bool,
     terminal_title_items: Vec<crate::terminal_title::TerminalTitleItem>,
     terminal_title_last: Option<String>,
@@ -1025,46 +1026,13 @@ pub struct App {
     startup_hydrated: bool,
     pending_model_override: Option<String>,
     pending_cli_agent: Option<String>,
+    runtime_options: crate::config::ConfigRuntimeOptions,
     /// Shared background/interactive process registry (jobs UI next).
     pub process_registry: std::sync::Arc<crate::tools::ProcessRegistry>,
 }
 
-/// Cached sum of context tokens for all completed messages of the currently
-/// viewed streaming session; only the streaming message changes per refresh.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct StreamingUsageBase {
-    session_id: Option<String>,
-    message_count: usize,
-    streaming_idx: Option<usize>,
-    base_tokens: usize,
-}
-
 impl App {
     const INTERRUPTED_TURN_CONTINUATION_GUIDANCE: &'static str = "The previous turn was interrupted. Address the newest request, then resume unfinished work unless the user canceled or redirected it. Do not claim completion prematurely.";
-
-    fn apply_turn_guidance(
-        messages: &mut Vec<crate::session::types::Message>,
-        turn_guidance: Option<&str>,
-    ) {
-        let Some(guidance) = turn_guidance
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        else {
-            return;
-        };
-
-        if let Some(system_message) = messages
-            .iter_mut()
-            .find(|message| message.role == crate::session::types::MessageRole::System)
-        {
-            if !system_message.content.trim().is_empty() {
-                system_message.content.push_str("\n\n");
-            }
-            system_message.content.push_str(guidance);
-        } else {
-            messages.insert(0, crate::session::types::Message::system(guidance));
-        }
-    }
 
     pub fn new() -> Result<Self> {
         Self::new_with_model_override(None, None)
@@ -1079,12 +1047,24 @@ impl App {
         model_override: Option<&str>,
         cli_agent: Option<&str>,
     ) -> Result<Self> {
-        Self::new_shell(model_override, cli_agent)
+        Self::new_with_runtime_options(model_override, cli_agent, Default::default())
+    }
+
+    pub fn new_with_runtime_options(
+        model_override: Option<&str>,
+        cli_agent: Option<&str>,
+        runtime_options: crate::config::ConfigRuntimeOptions,
+    ) -> Result<Self> {
+        Self::new_shell(model_override, cli_agent, runtime_options)
     }
 
     /// Minimal App for first paint. Heavy config/prefs/themes/skills load in
     /// [`Self::ensure_startup_hydrated`].
-    fn new_shell(model_override: Option<&str>, cli_agent: Option<&str>) -> Result<Self> {
+    fn new_shell(
+        model_override: Option<&str>,
+        cli_agent: Option<&str>,
+        runtime_options: crate::config::ConfigRuntimeOptions,
+    ) -> Result<Self> {
         let mut registry = Registry::new();
         register_all_commands(&mut registry);
 
@@ -1092,7 +1072,6 @@ impl App {
         let placeholder = Self::get_random_placeholder();
         let placeholder_static: &'static str = Box::leak(placeholder.into_boxed_str());
         input.set_placeholder(placeholder_static);
-        input.set_image_open_config(crate::config::ImagesConfig::default());
 
         let mut chat = Chat::new();
         chat.set_agent_mention_names(Vec::new());
@@ -1211,6 +1190,7 @@ impl App {
             message_actions_dialog: None,
             message_actions_return_focus: OverlayFocus::TimelineDialog,
             selection_action_bar: None,
+            file_actions: None,
             pending_chat_message_click: None,
             api_key_input,
             provider_oauth_receiver: None,
@@ -1253,10 +1233,10 @@ impl App {
             theme_transparent,
             sounds: crate::sound::ResolvedSoundsConfig::default(),
             notifications: crate::config::NotificationsConfig::default(),
-            images: crate::config::ImagesConfig::default(),
             editor: crate::config::EditorConfig::default(),
             pending_editor_suspend: None,
             websearch: crate::config::configuration::WebsearchConfig::default(),
+            compaction: crate::config::configuration::CompactionConfig::default(),
             mcp: crate::config::configuration::McpConfig::default(),
             mcp_manager: None,
             mcp_summary: crate::views::home::McpSummary::default(),
@@ -1264,7 +1244,8 @@ impl App {
             config_raw_merged: serde_json::json!({}),
             custom_instructions: String::new(),
             terminal_focused: true,
-            tool_permissions: crate::tools::ToolPermissions::new(cwd_path.clone()),
+            tool_permissions: crate::tools::ToolPermissions::new(cwd_path.clone())
+                .dangerously_skip_permissions(runtime_options.dangerously_skip_permissions),
             skills_dirs: Vec::new(),
             plugin_specs: Vec::new(),
             project_root: std::path::PathBuf::from("."),
@@ -1285,7 +1266,7 @@ impl App {
             discovery: None,
             cached_usage_text: String::new(),
             cached_usage_check: (0, 0, 0),
-            cached_usage_streaming_base: None,
+            cached_usage_streaming_base: Default::default(),
             terminal_title_enabled: crate::notify::terminal_title_supported(),
             terminal_title_items: crate::terminal_title::default_items(),
             terminal_title_last: None,
@@ -1294,6 +1275,7 @@ impl App {
             startup_hydrated: false,
             pending_model_override: model_override.map(str::to_string),
             pending_cli_agent: cli_agent.map(str::to_string),
+            runtime_options,
             process_registry: std::sync::Arc::new(crate::tools::ProcessRegistry::with_workdir(
                 cwd_path,
             )),
@@ -1329,8 +1311,6 @@ impl App {
         crate::remote_mcp::apply_mcp_overrides(&mut mcp_config, prefs_dao.as_ref());
         let warm_cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         self.mcp_manager = Some(crate::mcp::McpManager::ensure(mcp_config.clone(), warm_cwd));
-        self.input
-            .set_image_open_config(loaded_config.merged_config.images.clone());
         if !loaded_config.diagnostics.info.is_empty() {
             for msg in &loaded_config.diagnostics.info {
                 crate::startup_diag!("Config: {}", msg);
@@ -1374,7 +1354,8 @@ impl App {
                 loaded_config.merged_config.watcher.is_enabled(),
                 loaded_config.merged_config.watcher.ignored_paths().to_vec(),
             )
-            .with_agents(agent_suggestions),
+            .with_agents(agent_suggestions)
+            .with_skills(Self::skill_suggestions(&agent_registry)),
         );
 
         let mut agent = self.agent.clone();
@@ -1478,11 +1459,7 @@ impl App {
         self.chat_state.wave_spinner.set_color(agent_color);
         self.session_rename_dialog_state.set_colors(colors);
 
-        let runtime = crate::config::ConfigRuntime::from_merged(
-            &loaded_config.merged_config,
-            cwd_path.clone(),
-            crate::config::ConfigRuntimeOptions::default(),
-        );
+        self.apply_config_runtime(&loaded_config.merged_config, cwd_path.clone());
 
         self.prefs_dao = prefs_dao;
         self.agent = agent;
@@ -1495,22 +1472,31 @@ impl App {
         self.reasoning_efforts = reasoning_efforts;
         self.sounds = resolved_sounds;
         self.notifications = loaded_config.merged_config.notifications.clone();
-        self.images = loaded_config.merged_config.images.clone();
         self.editor = loaded_config.merged_config.editor.clone();
         self.websearch = loaded_config.merged_config.websearch.clone();
+        self.compaction = loaded_config.merged_config.compaction.clone();
         self.mcp = mcp_config;
         self.config_raw_merged = loaded_config.raw_merged;
-        self.custom_instructions = runtime.custom_instructions;
-        self.tool_permissions = runtime.tool_permissions;
         self.skills_dirs = loaded_config.inventory.opencode_skills_dirs;
         self.plugin_specs = plugin_specs;
         self.project_root = project_root;
-        self.discovery = runtime.discovery;
         self.terminal_title_items = terminal_title_items;
         self.startup_hydrated = true;
         self.pending_model_override = None;
         self.pending_cli_agent = None;
         Ok(())
+    }
+
+    fn apply_config_runtime(
+        &mut self,
+        merged: &crate::config::configuration::MergedConfig,
+        cwd: std::path::PathBuf,
+    ) {
+        let runtime =
+            crate::config::ConfigRuntime::from_merged(merged, cwd, self.runtime_options.clone());
+        self.custom_instructions = runtime.custom_instructions;
+        self.tool_permissions = runtime.tool_permissions;
+        self.discovery = runtime.discovery;
     }
 
     fn open_variants_dialog(&mut self, args: &[String]) {
@@ -1891,8 +1877,6 @@ impl App {
         };
         let is_child_session = self.session_manager.parent_id_of(&session_id).is_some();
 
-        self.ensure_session_view_state(&session_id);
-
         // Snapshot composer before borrowing the view state (disjoint fields,
         // but keep the borrow short and explicit).
         let draft_text = if is_child_session {
@@ -1905,7 +1889,13 @@ impl App {
         } else {
             self.input.local_image_paths_for_submission()
         };
-        if let Some(state) = self.session_view_states.get_mut(&session_id) {
+        // The live chat is already hydrated. Creating a hydrated placeholder
+        // here would clone the entire history only to immediately drop it.
+        {
+            let state = self
+                .session_view_states
+                .entry(session_id)
+                .or_insert_with(|| ClientSessionState::with_chat(Chat::new()));
             state.chat = std::mem::take(&mut self.chat_state.chat);
             state.find_bar = std::mem::take(&mut self.find_bar);
             state.input_draft = draft_text;
@@ -1916,9 +1906,9 @@ impl App {
     /// Free the rebuildable render caches of background chats that are not
     /// part of the current session family (shared root session). Chats inside
     /// the family keep their caches so cycling between subagent tabs stays a
-    /// warm-cache render, while memory does not scale with every session
-    /// visited during a run.
-    fn release_render_caches_outside_current_family(&mut self) {
+    /// warm-cache render. Also retain the immediately previous chat so hopping
+    /// between two histories is warm, without retaining every visited history.
+    fn release_render_caches_outside_current_family(&mut self, previous_id: Option<&str>) {
         let current_root = self
             .session_manager
             .get_current_session_id()
@@ -1927,7 +1917,7 @@ impl App {
         let manager = &self.session_manager;
 
         for (id, state) in self.session_view_states.iter_mut() {
-            if current_id.as_deref() == Some(id.as_str()) {
+            if current_id.as_deref() == Some(id.as_str()) || previous_id == Some(id.as_str()) {
                 continue;
             }
             let in_family = current_root
@@ -1970,13 +1960,14 @@ impl App {
         if !self.session_manager.ensure_session_loaded(session_id) {
             return false;
         }
+        let previous_id = self.session_manager.get_current_session_id().cloned();
         self.save_active_session_view_state();
         self.session_manager.switch_session(session_id);
         self.pending_session_title = None;
         self.load_session_view_state(session_id);
         // Pending hitboxes are re-rendered for the new session; drop stale hover.
         self.clear_queued_hover();
-        self.release_render_caches_outside_current_family();
+        self.release_render_caches_outside_current_family(previous_id.as_deref());
         let is_child_session = self.session_manager.parent_id_of(session_id).is_some();
         self.base_focus = if !is_child_session
             && self.chat_state.chat.messages.is_empty()
@@ -1996,7 +1987,7 @@ impl App {
     }
 
     fn open_selection_in_editor(&mut self) -> bool {
-        let Some(location) = self.selected_chat_editor_location() else {
+        let Some(mut location) = self.selected_chat_editor_location() else {
             push_toast(Toast::new(
                 "Selection is not on an editable code line",
                 ToastLevel::Error,
@@ -2005,13 +1996,18 @@ impl App {
             return true;
         };
 
-        match crate::utils::image_attachment::open_file_path_at_location(
+        if location.path.is_relative() {
+            location.path =
+                std::path::PathBuf::from(self.active_workspace_path()).join(&location.path);
+        }
+
+        match crate::utils::file_opener::open_file_path_at_location(
             &location.path,
             location.line,
             location.column,
             &self.editor,
         ) {
-            Ok(crate::utils::image_attachment::OpenOutcome::Spawned) => {
+            Ok(crate::utils::file_opener::OpenOutcome::Spawned) => {
                 push_toast(Toast::new(
                     format!(
                         "Opened {}:{}:{}",
@@ -2024,15 +2020,7 @@ impl App {
                 ));
                 self.dismiss_selection_actions();
             }
-            Ok(crate::utils::image_attachment::OpenOutcome::Copied(text)) => {
-                push_toast(Toast::new(
-                    format!("Copied {}", text),
-                    ToastLevel::Info,
-                    None,
-                ));
-                self.dismiss_selection_actions();
-            }
-            Ok(crate::utils::image_attachment::OpenOutcome::Suspend(command)) => {
+            Ok(crate::utils::file_opener::OpenOutcome::Suspend(command)) => {
                 self.pending_editor_suspend = Some(command);
                 self.dismiss_selection_actions();
             }
@@ -2351,6 +2339,19 @@ impl App {
     }
 
     fn persist_chat_messages_for_session(&mut self, session_id: &str) -> bool {
+        // Snapshots must be self-contained even if the process exits before
+        // finalization. Use the captured turn metadata, not the current selection.
+        if let Some((start, model, provider)) = self.streaming_boundary_for_session(session_id) {
+            if let Some(chat) = self.chat_for_session_mut(session_id) {
+                for message in chat.messages.iter_mut().skip(start) {
+                    if message.role == crate::session::types::MessageRole::Assistant {
+                        message.model = model.clone();
+                        message.provider = provider.clone();
+                    }
+                }
+            }
+        }
+
         let Some(messages) = self
             .chat_for_session(session_id)
             .map(|chat| chat.messages.clone())
@@ -2919,46 +2920,13 @@ impl App {
     /// streaming message (already tracked by the chat's token counter) needs
     /// per-refresh accounting.
     fn streaming_context_tokens_cached(&mut self) -> usize {
-        let session_id = self.session_manager.get_current_session_id().cloned();
-        let messages = &self.chat_state.chat.messages;
-        let message_count = messages.len();
-        let streaming_idx = messages.iter().rposition(|message| {
-            message.role == crate::session::types::MessageRole::Assistant && !message.is_complete
-        });
-
-        let cache_valid = self
-            .cached_usage_streaming_base
-            .as_ref()
-            .is_some_and(|base| {
-                base.session_id == session_id
-                    && base.message_count == message_count
-                    && base.streaming_idx == streaming_idx
-            });
-        if !cache_valid {
-            let base_tokens = messages
-                .iter()
-                .enumerate()
-                .filter(|(idx, _)| Some(*idx) != streaming_idx)
-                .map(|(_, message)| crate::session::compaction::message_context_tokens(message))
-                .sum();
-            self.cached_usage_streaming_base = Some(StreamingUsageBase {
-                session_id,
-                message_count,
-                streaming_idx,
-                base_tokens,
-            });
-        }
-
-        let base_tokens = self
-            .cached_usage_streaming_base
-            .as_ref()
-            .map(|base| base.base_tokens)
-            .unwrap_or(0);
-        if streaming_idx.is_some() {
-            base_tokens.saturating_add(self.chat_state.chat.streaming_token_count())
-        } else {
-            base_tokens
-        }
+        self.cached_usage_streaming_base.count(
+            self.session_manager
+                .get_current_session_id()
+                .map(String::as_str),
+            &self.chat_state.chat.messages,
+            self.chat_state.chat.streaming_token_count(),
+        )
     }
 
     fn reasoning_capability_for_model(
@@ -3456,7 +3424,7 @@ impl App {
         self.themes_dialog_state.set_transparent(transparent);
         if let Some(ref dao) = self.prefs_dao {
             if let Err(e) = dao.set_theme_transparent(transparent) {
-                eprintln!("Failed to save theme transparency: {}", e);
+                crate::emit_log!("Failed to save theme transparency: {}", e);
             }
         }
     }
@@ -3464,7 +3432,7 @@ impl App {
     fn persist_theme_selection(&self, theme_id: &str) {
         if let Some(ref dao) = self.prefs_dao {
             if let Err(e) = dao.set_active_theme(theme_id.to_string()) {
-                eprintln!("Failed to save active theme: {}", e);
+                crate::emit_log!("Failed to save active theme: {}", e);
             }
         }
     }
@@ -3836,6 +3804,11 @@ impl App {
     }
 
     pub fn handle_coalesced_mouse_scroll(&mut self, mouse: MouseEvent, notches: usize) {
+        self.validate_file_actions();
+        if self.file_actions.is_some() {
+            self.handle_mouse_event(mouse);
+            return;
+        }
         // The /btw panel scrolls independently (home and chat alike).
         if matches!(
             self.overlay_focus,
@@ -3873,6 +3846,12 @@ impl App {
             return;
         }
         self.note_user_activity();
+        self.validate_file_actions();
+        if let Some(popup) = self.file_actions.as_mut() {
+            let event = popup.handle_key(key);
+            self.apply_file_action_event(event);
+            return;
+        }
 
         if self.overlay_focus == OverlayFocus::FindBar && !self.can_open_find_bar() {
             self.close_find_bar_focus();
@@ -3964,6 +3943,23 @@ impl App {
             self.which_key_state
                 .set_chat_active(self.base_focus == BaseFocus::Chat);
             self.which_key_state.show();
+            self.record_overlay_close_after_key(overlay_before_key);
+            return;
+        }
+        // Ctrl+D quits when there is no draft (EOF semantics, like opencode).
+        // Non-empty input falls through to the input handler where tui-textarea
+        // maps Ctrl+D to delete-forward, preserving emacs editing. Guarded to
+        // chat-level focus so ConnectDialog disconnect, sessions search/item
+        // menu, and other dialog Ctrl+D actions keep working.
+        if key.code == KeyCode::Char('d')
+            && key.modifiers == event::KeyModifiers::CONTROL
+            && matches!(
+                self.overlay_focus,
+                OverlayFocus::None | OverlayFocus::SuggestionsPopup
+            )
+            && !self.input.has_draft_content()
+        {
+            self.quit();
             self.record_overlay_close_after_key(overlay_before_key);
             return;
         }
@@ -4085,7 +4081,7 @@ impl App {
                             if let Err(e) =
                                 dao.set_active_model(provider_id.clone(), model_id_clone.clone())
                             {
-                                eprintln!("Failed to save active model: {}", e);
+                                crate::emit_log!("Failed to save active model: {}", e);
                             }
                         }
 
@@ -4475,22 +4471,11 @@ impl App {
                     &mut self.skills_dialog_state,
                     key,
                 );
-                match action {
-                    crate::views::skills_dialog::SkillsDialogAction::SelectSkill {
-                        skill_id: _,
-                    } => {
-                        if !self.skills_dialog_state.dialog.is_visible() {
-                            self.overlay_focus = OverlayFocus::None;
-                        }
-                        true
-                    }
-                    crate::views::skills_dialog::SkillsDialogAction::None => {
-                        if !self.skills_dialog_state.dialog.is_visible() {
-                            self.overlay_focus = OverlayFocus::None;
-                        }
-                        false
-                    }
+                self.handle_skills_dialog_action(action);
+                if !self.skills_dialog_state.dialog.is_visible() {
+                    self.overlay_focus = OverlayFocus::None;
                 }
+                true
             }
             OverlayFocus::McpDialog => {
                 let action = handle_mcp_dialog_key_event(&mut self.mcp_dialog_state, key);
@@ -4763,6 +4748,15 @@ impl App {
     }
 
     fn handle_suggestions_popup_keys(&mut self, key: KeyEvent) -> bool {
+        if key.code == KeyCode::Enter
+            && key.modifiers == KeyModifiers::NONE
+            && self.input.submission_text().trim() == "/"
+            && !self.suggestions_popup_state.popup.selection_is_explicit()
+        {
+            self.clear_suggestions_and_blur();
+            self.handle_input_and_app_keys(key);
+            return true;
+        }
         let action = handle_suggestions_popup_key_event(&mut self.suggestions_popup_state, key);
         match action {
             crate::ui::components::popup::PopupAction::Handled => true,
@@ -4843,7 +4837,7 @@ impl App {
         self.chat_state.compact_mode = enabled;
         if let Some(dao) = &self.prefs_dao {
             if let Err(error) = dao.set_compact_mode(enabled) {
-                eprintln!("Failed to persist compact mode preference: {error}");
+                crate::emit_log!("Failed to persist compact mode preference: {}", error);
             }
         }
         push_toast(Toast::new(
@@ -5037,11 +5031,11 @@ impl App {
                 self.selection_action_bar = None;
             }
         } else if self.selection_action_bar.is_some() {
-            // Editing keys natively delete/replace the input selection
-            // (Backspace erases it, typing replaces it). Dismissing first
-            // would collapse the selection so the edit lands on a single
-            // cursor instead — preserve it and let the input handle it.
-            if self.input.has_selection() && Self::is_input_edit_key(key) {
+            // Let the input use the selection for edits and plain-arrow
+            // collapse. Dismissing it here loses the boundaries first.
+            let collapses_selection = key.modifiers == KeyModifiers::NONE
+                && matches!(key.code, KeyCode::Left | KeyCode::Right);
+            if self.input.has_selection() && (Self::is_input_edit_key(key) || collapses_selection) {
                 self.chat_state.chat.selection.clear();
                 self.jobs_dialog_state.clear_selection();
                 self.pending_chat_message_click = None;
@@ -5068,9 +5062,7 @@ impl App {
                 let image_paths = self.input.local_image_paths_for_submission();
                 let input_text = self.input.submission_text();
                 if !input_text.is_empty() || !image_paths.is_empty() {
-                    use crate::command::parser::parse_input;
-
-                    let input_type = parse_input(&input_text);
+                    let input_type = self.parse_prompt_input(&input_text);
                     match input_type {
                         crate::command::parser::InputType::Command(parsed) => {
                             // Don't save commands to prompt history
@@ -5141,6 +5133,59 @@ impl App {
 
     fn can_submit_input(input_type: &InputType, is_streaming: bool) -> bool {
         matches!(input_type, InputType::Command(_)) || !is_streaming
+    }
+
+    /// Only registered slash commands and agent mentions are special input.
+    /// Skill mentions and unknown slash tokens are ordinary prompts, retaining
+    /// history, attachments, and the normal busy-session queue behavior.
+    fn parse_prompt_input(&self, input: &str) -> InputType {
+        match crate::command::parser::parse_input(input) {
+            InputType::Command(parsed) if self.command_registry.get(&parsed.name).is_none() => {
+                InputType::Message(parsed.raw)
+            }
+            InputType::AgentMention(mention)
+                if self.agent_registry.task_target(&mention.agent).is_none()
+                    && (self
+                        .input
+                        .autocomplete
+                        .as_ref()
+                        .is_some_and(|autocomplete| {
+                            autocomplete
+                                .skills
+                                .iter()
+                                .any(|skill| skill.name.eq_ignore_ascii_case(&mention.agent))
+                        })
+                        || crate::skill::get_skill_store().is_some_and(|store| {
+                            store
+                                .all()
+                                .iter()
+                                .any(|skill| skill.name.eq_ignore_ascii_case(&mention.agent))
+                        })) =>
+            {
+                InputType::Message(mention.raw)
+            }
+            input => input,
+        }
+    }
+
+    fn skill_suggestions(
+        agent_registry: &crate::agent::definition::AgentRegistry,
+    ) -> Vec<crate::autocomplete::Suggestion> {
+        crate::skill::get_skill_store()
+            .map(|store| {
+                store
+                    .all()
+                    .into_iter()
+                    .filter(|skill| agent_registry.task_target(&skill.name).is_none())
+                    .map(|skill| {
+                        crate::autocomplete::Suggestion::skill(
+                            skill.name.clone(),
+                            skill.description.clone().unwrap_or_default(),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     fn update_suggestions(&mut self) {
@@ -5275,6 +5320,18 @@ impl App {
             return false;
         }
 
+        if let Some(path) = self.input.take_file_action() {
+            self.show_file_actions(
+                FileHyperlinkTarget {
+                    path,
+                    line: None,
+                    column: None,
+                },
+                Position::new(mouse.column, mouse.row),
+            );
+            return true;
+        }
+
         if matches!(mouse.kind, MouseEventKind::Drag(MouseButton::Left))
             && self.input.has_selection()
             && !self.input.get_selected_text().is_empty()
@@ -5298,68 +5355,134 @@ impl App {
         true
     }
 
-    fn open_chat_image_target(&self, target: &ChatImageTarget) {
-        let path = std::path::Path::new(&target.path);
-        match crate::utils::image_attachment::open_path(path, &self.images) {
-            Ok(()) => push_toast(Toast::new(
-                format!("Opened {}", target.placeholder),
-                ToastLevel::Info,
-                None,
-            )),
-            Err(err) => push_toast(Toast::new(
-                format!("Failed to open image: {}", err),
-                ToastLevel::Error,
-                None,
-            )),
+    // File actions belong to the unobstructed chat/input, never to an async modal.
+    // Validate at every dispatch and paint: focus can change between mouse-down
+    // and the next key (permission/question/terminal requests arrive asynchronously).
+    fn validate_file_actions(&mut self) {
+        if self.overlay_focus != OverlayFocus::None {
+            self.file_actions = None;
         }
     }
 
-    fn open_chat_hyperlink_target(&mut self, target: &HyperlinkTarget) {
+    fn show_file_actions(&mut self, mut target: FileHyperlinkTarget, anchor: Position) {
+        self.validate_file_actions();
+        if self.overlay_focus != OverlayFocus::None {
+            return;
+        }
+        if target.path.is_relative() {
+            target.path = std::path::PathBuf::from(self.active_workspace_path()).join(&target.path);
+        }
+        match crate::utils::file_opener::absolute_file_path(&target.path) {
+            Ok(path) => target.path = path,
+            Err(err) => {
+                push_toast(Toast::new(
+                    format!("Failed to resolve file: {err}"),
+                    ToastLevel::Error,
+                    None,
+                ));
+                return;
+            }
+        }
+        self.dismiss_selection_actions();
+        self.pending_chat_message_click = None;
+        self.file_actions = Some(FileActions::new(target, anchor));
+    }
+
+    fn open_chat_image_target(&mut self, target: &ChatImageTarget, anchor: Position) {
+        self.show_file_actions(
+            FileHyperlinkTarget {
+                path: target.path.clone().into(),
+                line: None,
+                column: None,
+            },
+            anchor,
+        );
+    }
+
+    fn open_chat_hyperlink_target(&mut self, target: &HyperlinkTarget, anchor: Position) {
         match target {
-            HyperlinkTarget::File(target) => {
-                let result = if let Some(line) = target.line {
-                    crate::utils::image_attachment::open_file_path_at_location(
-                        &target.path,
-                        line,
-                        target.column.unwrap_or(1),
-                        &self.editor,
-                    )
-                } else {
-                    crate::utils::image_attachment::open_file_path(&target.path, &self.editor)
+            HyperlinkTarget::File(target) => self.show_file_actions(target.clone(), anchor),
+            HyperlinkTarget::Url(url) => match crate::utils::file_opener::open_url(url) {
+                Ok(()) => push_toast(Toast::new(format!("Opened {url}"), ToastLevel::Info, None)),
+                Err(err) => push_toast(Toast::new(
+                    format!("Failed to open link: {err}"),
+                    ToastLevel::Error,
+                    None,
+                )),
+            },
+        }
+    }
+
+    fn apply_file_action_event(&mut self, event: FileActionEvent) {
+        self.validate_file_actions();
+        match event {
+            FileActionEvent::None => {}
+            FileActionEvent::Dismiss => {
+                self.file_actions = None;
+            }
+            FileActionEvent::Choose(action) => {
+                let Some(popup) = self.file_actions.take() else {
+                    return;
+                };
+                if action == FileAction::Copy {
+                    self.copy_text_with_toast(&popup.copy_payload(), "Copied absolute path");
+                    return;
+                }
+                let target = popup.target;
+                if action == FileAction::Reveal {
+                    // push_toast uses the global Mutex<ToastManager>, so the
+                    // worker can report its outcome without borrowing the app.
+                    std::thread::spawn(move || {
+                        match crate::utils::file_opener::reveal_file_path(&target.path) {
+                            Ok(()) => push_toast(Toast::new(
+                                format!("Revealed {}", target.path.display()),
+                                ToastLevel::Info,
+                                None,
+                            )),
+                            Err(err) => push_toast(Toast::new(
+                                format!("File action failed: {err}"),
+                                ToastLevel::Error,
+                                None,
+                            )),
+                        }
+                    });
+                    return;
+                }
+                let result = match action {
+                    FileAction::Open => {
+                        let result = if let Some(line) = target.line {
+                            crate::utils::file_opener::open_file_path_at_location(
+                                &target.path,
+                                line,
+                                target.column.unwrap_or(1),
+                                &self.editor,
+                            )
+                        } else {
+                            crate::utils::file_opener::open_file_path(&target.path, &self.editor)
+                        };
+                        result.map(|outcome| {
+                            if let crate::utils::file_opener::OpenOutcome::Suspend(command) =
+                                outcome
+                            {
+                                self.pending_editor_suspend = Some(command);
+                            }
+                        })
+                    }
+                    FileAction::Reveal | FileAction::Copy => unreachable!(),
                 };
                 match result {
-                    Ok(crate::utils::image_attachment::OpenOutcome::Spawned) => {
-                        push_toast(Toast::new(
-                            format!("Opened {}", target.path.display()),
-                            ToastLevel::Info,
-                            None,
-                        ))
-                    }
-                    Ok(crate::utils::image_attachment::OpenOutcome::Copied(text)) => push_toast(
-                        Toast::new(format!("Copied {}", text), ToastLevel::Info, None),
-                    ),
-                    Ok(crate::utils::image_attachment::OpenOutcome::Suspend(command)) => {
-                        self.pending_editor_suspend = Some(command);
-                    }
+                    Ok(()) => push_toast(Toast::new(
+                        format!("Opened {}", target.path.display()),
+                        ToastLevel::Info,
+                        None,
+                    )),
                     Err(err) => push_toast(Toast::new(
-                        format!("Failed to open file: {}", err),
+                        format!("File action failed: {err}"),
                         ToastLevel::Error,
                         None,
                     )),
                 }
             }
-            HyperlinkTarget::Url(url) => match crate::utils::image_attachment::open_url(url) {
-                Ok(()) => push_toast(Toast::new(
-                    format!("Opened {}", url),
-                    ToastLevel::Info,
-                    None,
-                )),
-                Err(err) => push_toast(Toast::new(
-                    format!("Failed to open link: {}", err),
-                    ToastLevel::Error,
-                    None,
-                )),
-            },
         }
     }
 
@@ -5381,6 +5504,13 @@ impl App {
 
         if matches!(mouse.kind, MouseEventKind::Moved) && !self.input.contains_mouse(mouse) {
             self.input.clear_hover();
+        }
+
+        self.validate_file_actions();
+        if let Some(popup) = self.file_actions.as_mut() {
+            let event = popup.handle_mouse(self.last_frame_size, mouse);
+            self.apply_file_action_event(event);
+            return;
         }
 
         if self.handle_update_toast_mouse(mouse) {
@@ -5490,6 +5620,32 @@ impl App {
             return;
         }
 
+        // Clickable picker hints use exactly the same dispatch as keyboard
+        // shortcuts, including app-level actions such as connecting a provider.
+        let dialog = match self.overlay_focus {
+            OverlayFocus::AgentsDialog => Some(&self.agents_dialog_state.dialog),
+            OverlayFocus::ModelsDialog => Some(&self.models_dialog_state.dialog),
+            OverlayFocus::VariantsDialog => Some(&self.variants_dialog_state.dialog),
+            OverlayFocus::ThemesDialog => Some(&self.themes_dialog_state.dialog),
+            OverlayFocus::ConnectDialog => Some(&self.connect_dialog_state.dialog),
+            OverlayFocus::SessionsDialog if self.sessions_dialog_state.item_menu.is_none() => {
+                Some(&self.sessions_dialog_state.dialog)
+            }
+            OverlayFocus::SkillsDialog => Some(&self.skills_dialog_state.dialog),
+            OverlayFocus::McpDialog => Some(&self.mcp_dialog_state.dialog),
+            OverlayFocus::TimelineDialog => Some(&self.timeline_dialog_state.dialog),
+            OverlayFocus::CommandPalette => Some(&self.command_palette_state.dialog),
+            OverlayFocus::MoveSessionDialog => Some(&self.move_session_dialog_state.dialog),
+            OverlayFocus::JobsDialog if !self.jobs_dialog_state.is_detail_open() => {
+                Some(&self.jobs_dialog_state.dialog)
+            }
+            _ => None,
+        };
+        if let Some(key) = dialog.and_then(|dialog| dialog.mouse_key_event(mouse)) {
+            self.handle_keys(key);
+            return;
+        }
+
         if self.overlay_focus == OverlayFocus::AgentsDialog {
             let action = handle_agents_dialog_mouse_event(&mut self.agents_dialog_state, mouse);
             match action {
@@ -5519,7 +5675,7 @@ impl App {
                         if let Err(e) =
                             dao.set_active_model(provider_id.clone(), model_id_clone.clone())
                         {
-                            eprintln!("Failed to save active model: {}", e);
+                            crate::emit_log!("Failed to save active model: {}", e);
                         }
                     }
 
@@ -5692,10 +5848,11 @@ impl App {
                 }
             }
         } else if self.overlay_focus == OverlayFocus::SkillsDialog {
-            crate::views::skills_dialog::handle_skills_dialog_mouse_event(
+            let action = crate::views::skills_dialog::handle_skills_dialog_mouse_event(
                 &mut self.skills_dialog_state,
                 mouse,
             );
+            self.handle_skills_dialog_action(action);
             if !self.skills_dialog_state.dialog.is_visible() {
                 self.overlay_focus = OverlayFocus::None;
             }
@@ -5787,7 +5944,10 @@ impl App {
                         self.chat_state.chat.set_hovered_image(Some(target.clone()));
                         self.pending_chat_message_click = None;
                         self.close_message_actions();
-                        self.open_chat_image_target(&target);
+                        self.open_chat_image_target(
+                            &target,
+                            Position::new(mouse.column, mouse.row),
+                        );
                         return;
                     }
 
@@ -5796,7 +5956,10 @@ impl App {
                     {
                         self.pending_chat_message_click = None;
                         self.close_message_actions();
-                        self.open_chat_hyperlink_target(&target);
+                        self.open_chat_hyperlink_target(
+                            &target,
+                            Position::new(mouse.column, mouse.row),
+                        );
                         return;
                     }
                 }
@@ -5967,7 +6130,10 @@ impl App {
                         {
                             self.chat_state.chat.set_hovered_image(Some(target.clone()));
                             self.pending_chat_message_click = None;
-                            self.open_chat_image_target(&target);
+                            self.open_chat_image_target(
+                                &target,
+                                Position::new(mouse.column, mouse.row),
+                            );
                             return;
                         }
 
@@ -5975,7 +6141,10 @@ impl App {
                             self.chat_state.chat.hyperlink_at_position(mouse, chat_area)
                         {
                             self.pending_chat_message_click = None;
-                            self.open_chat_hyperlink_target(&target);
+                            self.open_chat_hyperlink_target(
+                                &target,
+                                Position::new(mouse.column, mouse.row),
+                            );
                             return;
                         }
 
@@ -6306,6 +6475,7 @@ impl App {
                     }
                 }
                 crate::autocomplete::SuggestionKind::Agent
+                | crate::autocomplete::SuggestionKind::Skill
                 | crate::autocomplete::SuggestionKind::File => {
                     self.input.apply_suggestion(&selected);
                     self.update_suggestions();
@@ -6662,13 +6832,13 @@ impl App {
     }
 
     fn open_copy_actions_dialog(&mut self) {
-        let model_item = ActionDialogItem {
-            id: "model".to_string(),
-            key: 'm',
-            label: "Copy provider+model id".to_string(),
-            description: "Active provider/model identifier".to_string(),
+        let input_item = ActionDialogItem {
+            id: "input".to_string(),
+            key: 'c',
+            label: "Copy current chat input".to_string(),
+            description: "Current draft in the input box".to_string(),
         };
-        let items = if self.base_focus == BaseFocus::Chat {
+        let mut items = if self.base_focus == BaseFocus::Chat {
             vec![
                 ActionDialogItem {
                     id: "transcript".to_string(),
@@ -6676,12 +6846,7 @@ impl App {
                     label: "Copy session transcript".to_string(),
                     description: "Full conversation as Markdown".to_string(),
                 },
-                ActionDialogItem {
-                    id: "input".to_string(),
-                    key: 'c',
-                    label: "Copy current chat input".to_string(),
-                    description: "Current draft in the input box".to_string(),
-                },
+                input_item,
                 ActionDialogItem {
                     id: "id".to_string(),
                     key: 'i',
@@ -6694,11 +6859,32 @@ impl App {
                     label: "Copy session title".to_string(),
                     description: "Current session name".to_string(),
                 },
-                model_item,
             ]
+        } else if !self.input.submission_text().trim().is_empty() {
+            vec![input_item]
         } else {
-            vec![model_item]
+            vec![]
         };
+        items.extend([
+            ActionDialogItem {
+                id: "provider".to_string(),
+                key: 'p',
+                label: "Copy provider id".to_string(),
+                description: "Active provider identifier".to_string(),
+            },
+            ActionDialogItem {
+                id: "model_id".to_string(),
+                key: 'd',
+                label: "Copy model id".to_string(),
+                description: "Active model identifier without the provider prefix".to_string(),
+            },
+            ActionDialogItem {
+                id: "model".to_string(),
+                key: 'm',
+                label: "Copy provider+model id".to_string(),
+                description: "Active provider/model identifier".to_string(),
+            },
+        ]);
         let mut dialog = ActionDialog::with_items("Copy", items);
         dialog.show();
         self.copy_actions_dialog = Some(dialog);
@@ -6707,6 +6893,14 @@ impl App {
 
     fn execute_copy_action(&mut self, action: &str) {
         match action {
+            "provider" => {
+                let text = self.provider_name.clone();
+                self.copy_text_with_toast(&text, "Provider id copied to clipboard");
+            }
+            "model_id" => {
+                let text = self.model.clone();
+                self.copy_text_with_toast(&text, "Model id copied to clipboard");
+            }
             "model" => {
                 let text = format!("{}/{}", self.provider_name, self.model);
                 self.copy_text_with_toast(&text, "Provider+model id copied to clipboard");
@@ -7140,6 +7334,10 @@ impl App {
     }
 
     fn start_compact_session(&mut self, session_id: &str) {
+        self.start_compact_session_with_min(session_id, 0);
+    }
+
+    fn start_compact_session_with_min(&mut self, session_id: &str, minimum_tokens: usize) {
         if self.compaction_receiver.is_some() {
             push_toast(Toast::new(
                 "Compaction is already running",
@@ -7175,7 +7373,7 @@ impl App {
         let Some(selection) = crate::session::compaction::select_messages_for_compaction_with_min(
             &messages,
             crate::session::compaction::DEFAULT_TAIL_TURNS,
-            0,
+            minimum_tokens,
         ) else {
             self.play_sound_event(crate::sound::SoundEvent::Error);
             push_toast(Toast::new(
@@ -7353,9 +7551,7 @@ impl App {
     }
 
     async fn process_input(&mut self, input: &str) {
-        use crate::command::parser::parse_input;
-
-        match parse_input(input) {
+        match self.parse_prompt_input(input) {
             InputType::Command(mut parsed) => {
                 // Popup Accept / autocomplete_and_submit land here — must record MRU
                 // (process_command_input is only used by some Enter paths).
@@ -7611,6 +7807,10 @@ impl App {
     }
 
     async fn process_command_input(&mut self, mut parsed: crate::command::parser::ParsedCommand) {
+        if self.command_registry.get(&parsed.name).is_none() {
+            self.handle_message_input(parsed.raw);
+            return;
+        }
         if let Some(autocomplete) = self.input.autocomplete.as_ref() {
             autocomplete.command_auto.touch_mru(&parsed.name);
         }
@@ -8237,9 +8437,23 @@ impl App {
             .map(|session| fork_title_from_session_title(&session.title))
             .unwrap_or_else(|| fork_title_from_session_title("fork"));
 
-        let _ = self.create_new_session(Some(fork_title));
-        for msg in &messages_to_fork {
-            let _ = self.session_manager.add_message_to_current_session(msg);
+        let fork_id = self.create_new_session(Some(fork_title));
+        let messages_to_fork =
+            match crate::persistence::attachments::clone_messages(&messages_to_fork, &fork_id) {
+                Ok(messages) => messages,
+                Err(error) => {
+                    self.session_manager.delete_session(&fork_id);
+                    self.push_command_error(format!("Failed to copy fork attachments: {error}"));
+                    return false;
+                }
+            };
+        if let Err(error) = self
+            .session_manager
+            .replace_session_messages(&fork_id, messages_to_fork.clone())
+        {
+            self.session_manager.delete_session(&fork_id);
+            self.push_command_error(format!("Failed to persist fork: {error:?}"));
+            return false;
         }
 
         self.chat_state.chat.clear();
@@ -8302,29 +8516,29 @@ impl App {
                     return;
                 }
 
-                let (undone_message, removed_count): (
-                    Option<crate::session::types::Message>,
-                    usize,
-                ) = {
+                let (session_id, undone_message, removed_count) = {
                     if let Some(session) = self.session_manager.get_current_session() {
                         let len = session.messages.len();
                         let message = session.messages.get(idx).cloned();
-                        session.messages.truncate(idx);
-                        (message, len.saturating_sub(idx))
+                        (session.id.clone(), message, len.saturating_sub(idx))
                     } else {
                         return;
                     }
                 };
 
-                let remaining: Vec<crate::session::types::Message> = {
-                    if let Some(session) = self.session_manager.get_current_session() {
-                        session.messages.clone()
-                    } else {
-                        return;
-                    }
-                };
+                if let Err(error) = self
+                    .session_manager
+                    .truncate_session_messages(&session_id, idx)
+                {
+                    push_toast(Toast::new(
+                        format!("Could not undo message: {error:?}"),
+                        ToastLevel::Error,
+                        None,
+                    ));
+                    return;
+                }
 
-                self.chat_state.chat.replace_messages(remaining);
+                self.chat_state.chat.truncate_messages(idx);
                 self.chat_state.chat.scroll_offset = usize::MAX;
                 self.chat_state.chat.clear_highlighted_message();
 
@@ -9068,33 +9282,45 @@ impl App {
     }
 
     fn show_skills_dialog(&mut self) {
-        use crate::ui::components::dialog::DialogItem;
-
-        let mut items: Vec<DialogItem> = Vec::new();
-
+        self.skills_dialog_state =
+            crate::views::skills_dialog::init_skills_dialog("Skills", vec![]);
         if let Some(store) = crate::skill::get_skill_store() {
-            for skill in store.all() {
-                items.push(DialogItem {
-                    id: skill.name.clone(),
-                    name: skill.name.clone(),
-                    group: "Skills".to_string(),
-                    description: skill.description.clone().unwrap_or_default(),
-                    tip: if skill.description.is_some() {
-                        None
-                    } else {
-                        Some("No description".to_string())
-                    },
-                    provider_id: String::new(),
-                    active: false,
-                });
-            }
+            self.skills_dialog_state.refresh(store);
         }
-
-        items.sort_by(|a, b| a.id.cmp(&b.id));
-
-        self.skills_dialog_state = crate::views::skills_dialog::init_skills_dialog("Skills", items);
         self.skills_dialog_state.dialog.show();
         self.overlay_focus = OverlayFocus::SkillsDialog;
+    }
+
+    fn handle_skills_dialog_action(
+        &mut self,
+        action: crate::views::skills_dialog::SkillsDialogAction,
+    ) {
+        let crate::views::skills_dialog::SkillsDialogAction::Toggle { skill_id } = action else {
+            return;
+        };
+        let result = (|| -> anyhow::Result<()> {
+            let store = crate::skill::get_skill_store()
+                .ok_or_else(|| anyhow::anyhow!("Skill store not initialized"))?;
+            let prefs = self
+                .prefs_dao
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("Preferences are unavailable"))?;
+            store.set_enabled(&skill_id, !store.is_enabled(&skill_id), prefs)?;
+            self.skills_dialog_state.refresh(store);
+            let skills = Self::skill_suggestions(&self.agent_registry);
+            if let Some(autocomplete) = self.input.autocomplete.as_mut() {
+                autocomplete.skills = skills;
+            }
+            Ok(())
+        })();
+        if let Err(err) = result {
+            self.play_sound_event(crate::sound::SoundEvent::Error);
+            push_toast(Toast::new(
+                format!("Failed to toggle skill: {err}"),
+                ToastLevel::Error,
+                Some(std::time::Duration::from_secs(3)),
+            ));
+        }
     }
 
     fn handle_mcp_slash(&mut self, args: &[String]) {
@@ -9238,7 +9464,7 @@ impl App {
         tokio::spawn(async move {
             let auth =
                 crate::mcp::oauth::authenticate_with_url_callback(&server_name, &remote, |url| {
-                    let _ = crate::utils::image_attachment::open_url(url);
+                    let _ = crate::utils::file_opener::open_url(url);
                 })
                 .await;
             let result = match auth {
@@ -10710,7 +10936,21 @@ impl App {
                 self.cancelled_streaming_session(session_id);
                 false
             }
-            crate::llm::ChunkMessage::Metrics { .. } => true,
+            crate::llm::ChunkMessage::Metrics {
+                duration_ms,
+                usage,
+                cost,
+                ..
+            } => {
+                if let Some(usage) = usage {
+                    if let Some(chat) = self.chat_for_session_mut(session_id) {
+                        chat.apply_streaming_usage(usage, cost, duration_ms);
+                    }
+                    self.mark_streaming_snapshot_pending(session_id);
+                }
+                true
+            }
+            crate::llm::ChunkMessage::TurnStopReason(_) => true,
             crate::llm::ChunkMessage::ToolCalls(tool_calls) => {
                 self.set_session_retry_status(session_id, None);
                 // Close the generation sample as a tool-calls finish (excluded from
@@ -10789,6 +11029,7 @@ impl App {
             crate::llm::ChunkMessage::QuestionRequest {
                 questions,
                 response_tx,
+                ..
             } => {
                 self.maybe_persist_streaming_snapshot_for_session(session_id, true);
                 let _ = self.session_manager.set_session_status(
@@ -10957,6 +11198,9 @@ impl App {
         }
 
         self.cleanup_streaming_for_session(session_id);
+        if self.maybe_start_auto_compaction(session_id) {
+            return;
+        }
         if self.submit_queued_messages_for_session(session_id) {
             return;
         }
@@ -10970,6 +11214,63 @@ impl App {
             completion_stats.as_deref(),
         );
         self.notify_terminal_event(completion_event);
+    }
+
+    fn maybe_start_auto_compaction(&mut self, session_id: &str) -> bool {
+        if !self.is_active_session(session_id)
+            || self.compaction_receiver.is_some()
+            || self.session_has_active_compaction(session_id)
+        {
+            return false;
+        }
+        if !self.should_auto_compact_current_session(None) {
+            return false;
+        }
+        self.start_compact_session_with_min(
+            session_id,
+            crate::session::compaction::MIN_COMPACTABLE_TOKENS,
+        );
+        self.compaction_receiver.is_some()
+    }
+
+    fn should_auto_compact_current_session(
+        &self,
+        pending_message: Option<&crate::session::types::Message>,
+    ) -> bool {
+        let (context_window, max_output_tokens) = self
+            .discovery
+            .as_ref()
+            .map(|discovery| {
+                (
+                    discovery.get_model_limit(&self.provider_name.to_lowercase(), &self.model),
+                    discovery
+                        .get_model_output_limit(&self.provider_name.to_lowercase(), &self.model),
+                )
+            })
+            .unwrap_or((None, None));
+        let Some(threshold) = crate::session::compaction::auto_compaction_threshold(
+            &self.compaction,
+            context_window,
+            max_output_tokens,
+        ) else {
+            return false;
+        };
+        let used_tokens =
+            crate::session::compaction::total_context_tokens(&self.chat_state.chat.messages)
+                .saturating_add(
+                    pending_message
+                        .map(crate::session::compaction::message_context_tokens)
+                        .unwrap_or(0),
+                )
+                .saturating_add(self.mcp_tool_prefix_tokens());
+        if used_tokens < threshold {
+            return false;
+        }
+        crate::session::compaction::select_messages_for_compaction(
+            &self.chat_state.chat.messages,
+            crate::session::compaction::DEFAULT_TAIL_TURNS,
+        )
+        .is_some()
     }
 
     fn defer_finish_if_tools_are_running(&mut self, session_id: &str) -> bool {
@@ -11493,7 +11794,6 @@ impl App {
         self.ensure_session_view_state(&session_id);
 
         let (sender, receiver) = mpsc::unbounded_channel();
-        let sender_clone = sender.clone();
 
         let cancel_token = tokio_util::sync::CancellationToken::new();
 
@@ -11514,8 +11814,9 @@ impl App {
         self.chat_state.chat.add_assistant_message("");
         if let Some(last_msg) = self.chat_state.chat.messages.last_mut() {
             last_msg.is_complete = false;
+            last_msg.model = streaming_model.clone();
+            last_msg.provider = streaming_provider.clone();
         }
-        self.chat_state.chat.mark_render_dirty();
 
         // Initialize per-turn streaming timing primitives (T0).
         self.chat_state.chat.begin_streaming_turn();
@@ -11532,7 +11833,13 @@ impl App {
             state.unread_completed = false;
             state.retry_status = None;
         }
-        self.persist_chat_messages_for_session(&session_id);
+        // The user message and prior turns are already persisted. Starting a
+        // turn must not serialize/rewrite the entire soft-compacted history.
+        if let Some(message) = self.chat_state.chat.messages.last() {
+            let _ = self
+                .session_manager
+                .add_message_to_session(&session_id, message);
+        }
         let _ = self.session_manager.set_session_status(
             &session_id,
             crate::session::types::SessionStatus::Streaming,
@@ -11555,105 +11862,32 @@ impl App {
         let agent_registry = self.agent_registry.clone();
         let websearch_config = self.websearch.clone();
         let mcp_config = self.mcp.clone();
+        let compaction_config = self.compaction.clone();
         let custom_instructions = self.custom_instructions.clone();
         let process_registry = self.process_registry.clone();
         let cwd = self.cwd.clone();
-        let is_git_repo = crate::utils::git::is_git_repo(&cwd).unwrap_or(false);
 
         self.start_session_title_generation(&session_id, _user_message);
 
-        // Build messages with system prompt
-        let mut messages = self.chat_state.chat.messages.clone();
-
-        // Check if we already have a system message
-        let has_system = messages
-            .iter()
-            .any(|m| m.role == crate::session::types::MessageRole::System);
-
-        if !has_system {
-            let prompt_registry = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(async {
-                    let registry = crate::tools::initialize_tool_registry_with_dynamic_config(
-                        Some(sender.clone()),
-                        tool_permissions.clone(),
-                        agent_registry.clone(),
-                        cancel_token.clone(),
-                        Some(&provider_name),
-                        &websearch_config,
-                        &mcp_config,
-                        &cwd,
-                        process_registry.clone(),
-                    )
-                    .await;
-                    crate::tools::scope_tool_registry_for_agent(
-                        &registry,
-                        &tool_permissions,
-                        &agent_mode,
-                    )
-                    .await
-                })
-            });
-
-            // Create system prompt with tools
-            let composer = crate::prompt::SystemPromptComposer::new(
-                &model,
-                &cwd,
-                is_git_repo,
-                std::env::consts::OS,
-            )
-            .with_tool_registry(prompt_registry)
-            .with_agent_registry(agent_registry.clone())
-            .with_active_agent(agent_mode.clone())
-            .with_custom_instructions(custom_instructions);
-            let system_prompt = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(async { composer.compose().await })
-            });
-            let system_msg = crate::session::types::Message::system(system_prompt);
-            messages.insert(0, system_msg);
+        crate::llm::turn::TurnRequest {
+            session_id,
+            provider_name,
+            model,
+            reasoning_effort,
+            agent_mode,
+            agent_max_steps,
+            agent_registry,
+            tool_permissions,
+            websearch_config,
+            mcp_config,
+            compaction_config,
+            custom_instructions,
+            process_registry,
+            cwd,
+            provider_timeout,
+            turn_guidance: turn_guidance.map(str::to_owned),
         }
-
-        Self::apply_turn_guidance(&mut messages, turn_guidance);
-
-        tokio::spawn(async move {
-            let stream = stream_llm_with_cancellation(
-                cancel_token,
-                session_id,
-                provider_name,
-                model,
-                reasoning_effort,
-                agent_mode,
-                agent_max_steps,
-                agent_registry,
-                tool_permissions,
-                websearch_config,
-                mcp_config,
-                cwd,
-                None,
-                messages,
-                sender_clone.clone(),
-                process_registry,
-            );
-
-            let result: Result<Result<(), Box<dyn std::error::Error>>, u64> = match provider_timeout
-            {
-                Some(crate::config::ProviderTimeout::Millis(ms)) => {
-                    match tokio::time::timeout(std::time::Duration::from_millis(ms), stream).await {
-                        Ok(inner) => Ok(inner),
-                        Err(_) => Err(ms),
-                    }
-                }
-                Some(crate::config::ProviderTimeout::Disabled) | None => Ok(stream.await),
-            };
-
-            let _ = match result {
-                Ok(Ok(())) => sender_clone.send(crate::llm::ChunkMessage::End),
-                Ok(Err(e)) => sender_clone.send(crate::llm::ChunkMessage::Failed(e.to_string())),
-                Err(ms) => sender_clone.send(crate::llm::ChunkMessage::Failed(format!(
-                    "Timeout: No response within {} ms",
-                    ms
-                ))),
-            };
-        });
+        .spawn(&self.chat_state.chat.messages, sender, cancel_token);
 
         Ok(())
     }
@@ -11741,7 +11975,7 @@ impl App {
         }
 
         let input = prompt.trim();
-        let parsed_input = crate::command::parser::parse_input(input);
+        let parsed_input = self.parse_prompt_input(input);
         let is_message = matches!(parsed_input, crate::command::parser::InputType::Message(_));
         let agent_mention = match &parsed_input {
             crate::command::parser::InputType::AgentMention(mention) => {
@@ -11865,25 +12099,25 @@ impl App {
                     .collect()
             }
             "mention" => {
+                if let Some(autocomplete) = &self.input.autocomplete {
+                    return autocomplete.mention_suggestions(query);
+                }
                 let query_lower = query.to_ascii_lowercase();
-                let mut suggestions = self
-                    .agent_registry
-                    .visible_subagents()
+                let mut suggestions = Self::skill_suggestions(&self.agent_registry)
                     .into_iter()
-                    .filter(|agent| agent.name.to_ascii_lowercase().starts_with(&query_lower))
-                    .map(|agent| {
-                        crate::autocomplete::Suggestion::agent(
-                            agent.name.clone(),
-                            agent.description.clone(),
-                        )
-                    })
+                    .filter(|skill| skill.name.to_ascii_lowercase().starts_with(&query_lower))
                     .collect::<Vec<_>>();
                 suggestions.extend(
-                    self.input
-                        .autocomplete
-                        .as_ref()
-                        .map(|autocomplete| autocomplete.file_auto.get_suggestions(query))
-                        .unwrap_or_default(),
+                    self.agent_registry
+                        .visible_subagents()
+                        .into_iter()
+                        .filter(|agent| agent.name.to_ascii_lowercase().starts_with(&query_lower))
+                        .map(|agent| {
+                            crate::autocomplete::Suggestion::agent(
+                                agent.name.clone(),
+                                agent.description.clone(),
+                            )
+                        }),
                 );
                 suggestions
             }
@@ -12483,6 +12717,22 @@ impl App {
         {
             if let Some(session_id) = self.session_manager.get_current_session_id().cloned() {
                 self.ensure_session_view_state(&session_id);
+                let mut pending_message = crate::session::types::Message::user(&msg);
+                pending_message.local_image_paths = image_paths
+                    .iter()
+                    .map(|path| path.to_string_lossy().to_string())
+                    .collect();
+                if self.compaction_receiver.is_none()
+                    && !self.session_has_active_compaction(&session_id)
+                    && self.should_auto_compact_current_session(Some(&pending_message))
+                    && self.queue_message_for_current_session(msg.clone(), image_paths.clone())
+                {
+                    self.start_compact_session_with_min(
+                        &session_id,
+                        crate::session::compaction::MIN_COMPACTABLE_TOKENS,
+                    );
+                    return;
+                }
             }
             self.append_user_message_to_current_session(msg.clone(), image_paths);
 
@@ -12499,6 +12749,7 @@ impl App {
     }
 
     pub fn render(&mut self, f: &mut ratatui::Frame) {
+        self.validate_file_actions();
         let size = f.area();
         self.last_frame_size = size;
         let colors = self.get_current_theme_colors();
@@ -12890,6 +13141,9 @@ impl App {
                 }
             };
             render_selection_action_bar(f, area, state, &colors);
+        }
+        if let Some(popup) = &self.file_actions {
+            popup.render(f, &colors);
         }
 
         toast::render_toasts(f, &get_toast_manager().lock().unwrap(), &colors);
@@ -13295,6 +13549,351 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn permission_bypass_survives_startup_config_application() {
+        let mut app = test_app();
+        app.runtime_options.dangerously_skip_permissions = true;
+        let mut merged = crate::config::configuration::MergedConfig::default();
+        merged.permission_rules.push(crate::tools::PermissionRule {
+            permission: "read".into(),
+            pattern: "*".into(),
+            action: crate::tools::PermissionPolicyAction::Ask,
+        });
+        app.apply_config_runtime(&merged, "/tmp/workspace".into());
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        assert!(app
+            .tool_permissions
+            .preflight(
+                "build",
+                "read",
+                &json!({ "file_path": "/tmp/elsewhere/file.txt" }),
+                Some(&tx),
+            )
+            .await
+            .is_ok());
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn image_and_filename_clicks_show_actions_before_opening() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("screenshot.png");
+        std::fs::write(&path, [0, 255]).unwrap();
+        let mut app = test_app();
+        app.editor = crate::config::EditorConfig {
+            open: Some("my-editor {path}".to_string()),
+            suspend: true,
+            ..Default::default()
+        };
+        let anchor = Position::new(12, 5);
+        app.open_chat_image_target(
+            &ChatImageTarget {
+                message_index: 0,
+                image_index: 0,
+                placeholder: "[Image #1]".to_string(),
+                path: path.to_string_lossy().into_owned(),
+            },
+            anchor,
+        );
+        assert!(app.take_editor_suspend().is_none());
+        assert!(app.file_actions.is_some());
+        app.apply_file_action_event(FileActionEvent::Choose(FileAction::Open));
+        let command = app
+            .take_editor_suspend()
+            .expect("Open requested suspension");
+        app.open_chat_hyperlink_target(
+            &HyperlinkTarget::File(FileHyperlinkTarget {
+                path,
+                line: None,
+                column: None,
+            }),
+            anchor,
+        );
+        assert!(app.take_editor_suspend().is_none());
+        app.apply_file_action_event(FileActionEvent::Choose(FileAction::Open));
+        assert_eq!(app.take_editor_suspend(), Some(command));
+        assert!(app.file_actions.is_none());
+    }
+
+    #[test]
+    fn file_actions_escape_and_outside_click_are_consumed() {
+        let mut app = test_app();
+        app.last_frame_size = Rect::new(0, 0, 80, 24);
+        let target = FileHyperlinkTarget {
+            path: "src/app.rs".into(),
+            line: Some(14),
+            column: Some(3),
+        };
+        app.show_file_actions(target.clone(), Position::new(12, 5));
+        app.handle_keys(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.file_actions.is_none());
+        assert!(app.take_editor_suspend().is_none());
+        app.show_file_actions(target, Position::new(12, 5));
+        app.handle_mouse_event(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(app.file_actions.is_none());
+        assert!(app.take_editor_suspend().is_none());
+    }
+
+    #[test]
+    fn file_actions_preserve_location_and_resolve_workspace_relative_path() {
+        let root = tempfile::tempdir().unwrap();
+        let mut app = test_app();
+        app.cwd = root.path().to_string_lossy().into_owned();
+        std::fs::write(root.path().join("file name.txt"), "text").unwrap();
+        app.editor = crate::config::EditorConfig {
+            open: Some("my-editor {path} {line} {col}".into()),
+            suspend: true,
+            ..Default::default()
+        };
+        app.show_file_actions(
+            FileHyperlinkTarget {
+                path: "file name.txt".into(),
+                line: Some(14),
+                column: Some(3),
+            },
+            Position::new(2, 2),
+        );
+        let target = &app.file_actions.as_ref().unwrap().target;
+        assert!(target.path.is_absolute());
+        assert_eq!(target.path.file_name().unwrap(), "file name.txt");
+        assert_eq!(target.line, Some(14));
+        let expected = crate::utils::file_opener::expand_editor_open_command(
+            "my-editor {path} {line} {col}",
+            &target.path,
+            14,
+            3,
+        )
+        .unwrap();
+        app.apply_file_action_event(FileActionEvent::Choose(FileAction::Open));
+        assert_eq!(app.take_editor_suspend(), Some(expected));
+    }
+
+    fn file_action_test_target() -> FileHyperlinkTarget {
+        FileHyperlinkTarget {
+            path: "/tmp/example file.txt".into(),
+            line: Some(12),
+            column: Some(3),
+        }
+    }
+
+    #[test]
+    fn file_actions_copy_payload_is_absolute_path_without_location() {
+        let mut app = test_app();
+        app.show_file_actions(file_action_test_target(), Position::new(2, 2));
+        assert_eq!(
+            app.file_actions.as_ref().unwrap().copy_payload(),
+            "/tmp/example file.txt"
+        );
+    }
+
+    #[test]
+    fn file_actions_yield_to_permission_request_before_enter() {
+        let mut app = test_app();
+        let session = app.create_new_session(Some("test".into()));
+        app.show_file_actions(file_action_test_target(), Position::new(2, 2));
+        let (response_tx, mut response_rx) = tokio::sync::oneshot::channel();
+        app.process_streaming_chunk_for_session(
+            &session,
+            crate::llm::ChunkMessage::PermissionRequest(PermissionPrompt {
+                tool_call_id: None,
+                tool_id: "list".into(),
+                action: PermissionAction::List,
+                permission: "external_directory".into(),
+                patterns: vec!["/tmp/*".into()],
+                target: Some("/tmp".into()),
+                command: None,
+                workdir: None,
+                workspace: "/tmp".into(),
+                reason: "approval required".into(),
+                raw_input: serde_json::Value::Null,
+                response_tx,
+            }),
+        );
+        assert_eq!(app.overlay_focus, OverlayFocus::PermissionDialog);
+        app.handle_keys(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.file_actions.is_none());
+        assert!(app.take_editor_suspend().is_none());
+        assert!(response_rx.try_recv().is_ok());
+    }
+
+    #[test]
+    fn file_actions_yield_to_question_request_before_enter() {
+        let mut app = test_app();
+        let session = app.create_new_session(Some("test".into()));
+        app.show_file_actions(file_action_test_target(), Position::new(2, 2));
+        let (response_tx, mut response_rx) = tokio::sync::oneshot::channel();
+        app.process_streaming_chunk_for_session(
+            &session,
+            crate::llm::ChunkMessage::QuestionRequest {
+                tool_call_id: Some("question".into()),
+                questions: json!([{ "question": "Continue?", "options": [{ "label": "Yes" }] }]),
+                response_tx,
+            },
+        );
+        assert_eq!(app.overlay_focus, OverlayFocus::QuestionDialog);
+        app.handle_keys(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        // First Enter advances to the submit screen; second submits.
+        app.handle_keys(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.file_actions.is_none());
+        assert!(app.take_editor_suspend().is_none());
+        assert!(response_rx.try_recv().is_ok());
+    }
+
+    #[test]
+    fn file_actions_yield_to_terminal_focus_before_enter() {
+        let mut app = test_app();
+        app.show_file_actions(file_action_test_target(), Position::new(2, 2));
+        let (control_tx, mut control_rx) = tokio::sync::mpsc::unbounded_channel();
+        app.terminal_session_dialog_state
+            .enqueue(crate::tools::TerminalSessionRequest {
+                start: crate::tools::TerminalSessionStart {
+                    session_id: "test".into(),
+                    tool_call_id: "terminal".into(),
+                    command: "test".into(),
+                    description: "test".into(),
+                    workdir: None,
+                    cols: 80,
+                    rows: 24,
+                    job_id: None,
+                },
+                control_tx,
+            });
+        app.overlay_focus = OverlayFocus::TerminalSessionDialog;
+        app.handle_keys(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.file_actions.is_none());
+        assert!(app.take_editor_suspend().is_none());
+        assert!(
+            matches!(control_rx.try_recv().unwrap(), crate::tools::TerminalSessionControl::Input(bytes) if bytes == b"\r")
+        );
+    }
+
+    #[test]
+    fn file_actions_cannot_open_over_modal_and_are_dismissed_on_paint() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut app = test_app();
+        app.show_file_actions(file_action_test_target(), Position::new(2, 2));
+        enqueue_jobs_test_terminal(&mut app);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        assert!(app.file_actions.is_none());
+        app.show_file_actions(file_action_test_target(), Position::new(2, 2));
+        assert!(app.file_actions.is_none());
+    }
+
+    #[test]
+    fn file_actions_real_relative_chat_click_uses_active_workspace() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().canonicalize().unwrap();
+        std::fs::create_dir(workspace.join("src")).unwrap();
+        let path = workspace.join("src/workspace-only.rs");
+        std::fs::write(&path, "text").unwrap();
+        assert_ne!(workspace, std::env::current_dir().unwrap());
+
+        // Exercise both direct detection and the known-tool short-path lookup.
+        for message in [
+            crate::session::types::Message::assistant("Open src/workspace-only.rs:14:3"),
+            crate::session::types::Message::tool(
+                json!({
+                    "name": "read", "status": "ok",
+                    "args": { "file_path": "src/workspace-only.rs" },
+                    "title": "Read: src/workspace-only.rs",
+                })
+                .to_string(),
+            ),
+        ] {
+            let mut app = test_app();
+            app.cwd = std::env::current_dir()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
+            let session = app.create_new_session(Some("Workspace link".into()));
+            app.session_manager
+                .get_session(&session)
+                .unwrap()
+                .workspace_path = workspace.to_string_lossy().into_owned();
+            assert_ne!(app.active_workspace_path(), app.cwd);
+            app.base_focus = BaseFocus::Chat;
+            app.chat_state.chat.add_message(message);
+            let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+            terminal.draw(|frame| app.render(frame)).unwrap();
+            let area = app.current_chat_area();
+            let hit = (area.y..area.bottom())
+                .find_map(|y| {
+                    (area.x..area.right()).find_map(|x| {
+                        let event = mouse(MouseEventKind::Down(MouseButton::Left), x, y);
+                        app.chat_state
+                            .chat
+                            .hyperlink_at_position(event, area)
+                            .map(|_| event)
+                    })
+                })
+                .expect("rendered relative chat link hitbox");
+            app.handle_mouse_event(hit);
+            let popup = app.file_actions.as_ref().expect("file actions after click");
+            assert_eq!(popup.target.path, path);
+            assert_eq!(popup.copy_payload(), path.to_string_lossy());
+            assert!(app.take_editor_suspend().is_none());
+        }
+    }
+
+    #[test]
+    fn file_actions_real_chat_link_and_input_image_clicks() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("screenshot.png");
+        std::fs::write(&path, [0, 255]).unwrap();
+        let mut app = test_app();
+        app.base_focus = BaseFocus::Chat;
+        app.chat_state
+            .chat
+            .add_message(crate::session::types::Message::assistant(format!(
+                "[screenshot]({})",
+                path.display()
+            )));
+        app.input.attach_image(path.clone());
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let area = app.current_chat_area();
+        let hit = (area.y..area.bottom())
+            .find_map(|y| {
+                (area.x..area.right()).find_map(|x| {
+                    let event = mouse(MouseEventKind::Down(MouseButton::Left), x, y);
+                    app.chat_state
+                        .chat
+                        .hyperlink_at_position(event, area)
+                        .map(|_| event)
+                })
+            })
+            .expect("rendered chat link hitbox");
+        app.handle_mouse_event(hit);
+        assert_eq!(app.file_actions.as_ref().unwrap().target.path, path);
+        assert!(app.take_editor_suspend().is_none());
+        app.handle_keys(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        let buffer = terminal.backend().buffer();
+        let hit = (0..30)
+            .find_map(|y| {
+                (0..100).find_map(|x| {
+                    let text: String = (x..100).map(|col| buffer[(col, y)].symbol()).collect();
+                    text.starts_with("[Image #1]").then_some(mouse(
+                        MouseEventKind::Down(MouseButton::Left),
+                        x,
+                        y,
+                    ))
+                })
+            })
+            .expect("rendered input image placeholder");
+        app.handle_mouse_event(hit);
+        assert_eq!(app.file_actions.as_ref().unwrap().target.path, path);
+        assert!(app.take_editor_suspend().is_none());
+    }
+
     fn test_app() -> App {
         let mut registry = Registry::new();
         register_all_commands(&mut registry);
@@ -13305,11 +13904,7 @@ mod tests {
         App {
             running: true,
             version: "test".to_string(),
-            input: {
-                let mut input = Input::new();
-                input.set_image_open_config(crate::config::ImagesConfig::default());
-                input
-            },
+            input: Input::new(),
             command_registry: registry,
             session_manager: SessionManager::new(),
             home_state: init_home(),
@@ -13352,6 +13947,7 @@ mod tests {
             message_actions_dialog: None,
             message_actions_return_focus: OverlayFocus::TimelineDialog,
             selection_action_bar: None,
+            file_actions: None,
             pending_chat_message_click: None,
             api_key_input: crate::ui::components::api_key_input::ApiKeyInput::new(),
             provider_oauth_receiver: None,
@@ -13394,10 +13990,10 @@ mod tests {
             theme_transparent: false,
             sounds: crate::sound::ResolvedSoundsConfig::default(),
             notifications: crate::config::NotificationsConfig::default(),
-            images: crate::config::ImagesConfig::default(),
             editor: crate::config::EditorConfig::default(),
             pending_editor_suspend: None,
             websearch: crate::config::configuration::WebsearchConfig::default(),
+            compaction: crate::config::configuration::CompactionConfig::default(),
             mcp: crate::config::configuration::McpConfig::default(),
             mcp_manager: None,
             mcp_summary: crate::views::home::McpSummary::default(),
@@ -13426,7 +14022,7 @@ mod tests {
             discovery: None,
             cached_usage_text: String::new(),
             cached_usage_check: (0, 0, 0),
-            cached_usage_streaming_base: None,
+            cached_usage_streaming_base: Default::default(),
             terminal_title_enabled: false,
             terminal_title_items: crate::terminal_title::default_items(),
             terminal_title_last: None,
@@ -13435,10 +14031,97 @@ mod tests {
             startup_hydrated: true,
             pending_model_override: None,
             pending_cli_agent: None,
+            runtime_options: crate::config::ConfigRuntimeOptions::default(),
             process_registry: std::sync::Arc::new(crate::tools::ProcessRegistry::with_workdir(
                 std::path::PathBuf::from("."),
             )),
         }
+    }
+
+    fn click_dialog_text(buffer: &ratatui::buffer::Buffer, text: &str) -> MouseEvent {
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                let row = (x..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>();
+                if row.starts_with(text) {
+                    return mouse(MouseEventKind::Down(MouseButton::Left), x, y);
+                }
+            }
+        }
+        panic!("missing rendered dialog text: {text}");
+    }
+
+    #[test]
+    fn dialog_escape_clicks_close_overlay_without_changing_chat_draft() {
+        let mut app = test_app();
+        app.input.set_text("keep this draft");
+        let colors = crate::theme::Theme::load_builtin_default().get_colors(true);
+        for focus in [
+            OverlayFocus::ModelsDialog,
+            OverlayFocus::AgentsDialog,
+            OverlayFocus::ConnectDialog,
+            OverlayFocus::McpDialog,
+            OverlayFocus::CommandPalette,
+            OverlayFocus::JobsDialog,
+        ] {
+            app.overlay_focus = focus;
+            let dialog = match focus {
+                OverlayFocus::ModelsDialog => &mut app.models_dialog_state.dialog,
+                OverlayFocus::AgentsDialog => &mut app.agents_dialog_state.dialog,
+                OverlayFocus::ConnectDialog => &mut app.connect_dialog_state.dialog,
+                OverlayFocus::McpDialog => &mut app.mcp_dialog_state.dialog,
+                OverlayFocus::CommandPalette => &mut app.command_palette_state.dialog,
+                OverlayFocus::JobsDialog => &mut app.jobs_dialog_state.dialog,
+                _ => unreachable!(),
+            };
+            dialog.show();
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 30)).unwrap();
+            terminal
+                .draw(|frame| dialog.render(frame, frame.area(), colors))
+                .unwrap();
+            let click = click_dialog_text(terminal.backend().buffer(), "esc");
+            app.handle_mouse_event(click);
+            assert_eq!(app.overlay_focus, OverlayFocus::None, "{focus:?}");
+            assert_eq!(app.input.get_text(), "keep this draft");
+        }
+    }
+
+    #[test]
+    fn variant_footer_click_confirms_through_app_key_dispatch() {
+        let mut app = test_app();
+        app.overlay_focus = OverlayFocus::VariantsDialog;
+        let capability = crate::model::reasoning::ReasoningCapability::effort(
+            vec![
+                crate::model::reasoning::ReasoningEffort::Low,
+                crate::model::reasoning::ReasoningEffort::High,
+            ],
+            crate::model::reasoning::ReasoningEffort::Low,
+        );
+        app.variants_dialog_state.show(
+            &capability,
+            Some(crate::model::reasoning::ReasoningEffort::High),
+        );
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 30)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_variants_dialog(
+                    frame,
+                    &mut app.variants_dialog_state,
+                    frame.area(),
+                    crate::theme::Theme::load_builtin_default().get_colors(true),
+                )
+            })
+            .unwrap();
+        let click = click_dialog_text(terminal.backend().buffer(), "Select  enter");
+        app.handle_mouse_event(click);
+        assert_eq!(app.overlay_focus, OverlayFocus::None);
+        assert_eq!(
+            app.reasoning_effort_override_for_model(&app.provider_name, &app.model),
+            Some(crate::model::reasoning::ReasoningEffort::High)
+        );
     }
 
     fn message_action_names(app: &App) -> Vec<String> {
@@ -13549,6 +14232,7 @@ mod tests {
         let mut app = test_app();
         let (permission_tx, _permission_rx) = tokio::sync::oneshot::channel();
         app.permission_dialog_state.enqueue(PermissionPrompt {
+            tool_call_id: None,
             tool_id: "list".to_string(),
             action: PermissionAction::List,
             permission: "external_directory".to_string(),
@@ -13556,7 +14240,9 @@ mod tests {
             target: Some("/tmp".to_string()),
             command: None,
             workdir: None,
+            workspace: "/tmp".to_string(),
             reason: "approval required".to_string(),
+            raw_input: serde_json::Value::Null,
             response_tx: permission_tx,
         });
         let (question_tx, _question_rx) = tokio::sync::oneshot::channel();
@@ -13580,6 +14266,7 @@ mod tests {
         let mut app = test_app();
         let (permission_tx, _permission_rx) = tokio::sync::oneshot::channel();
         app.permission_dialog_state.enqueue(PermissionPrompt {
+            tool_call_id: None,
             tool_id: "list".to_string(),
             action: PermissionAction::List,
             permission: "external_directory".to_string(),
@@ -13587,7 +14274,9 @@ mod tests {
             target: Some("/tmp".to_string()),
             command: None,
             workdir: None,
+            workspace: "/tmp".to_string(),
             reason: "approval required".to_string(),
+            raw_input: serde_json::Value::Null,
             response_tx: permission_tx,
         });
         let (question_tx, _question_rx) = tokio::sync::oneshot::channel();
@@ -14478,6 +15167,70 @@ mod tests {
     }
 
     #[test]
+    fn input_selection_plain_arrows_collapse_through_app() {
+        for source in ["mouse", "shift", "option-shift"] {
+            for backwards in [false, true] {
+                for arrow in [KeyCode::Left, KeyCode::Right] {
+                    let mut app = test_app();
+                    app.base_focus = BaseFocus::Chat;
+                    app.last_frame_size = ratatui::layout::Rect::new(0, 0, 80, 24);
+                    app.input.set_text("alpha beta");
+                    app.input
+                        .set_textarea_area_for_test(ratatui::layout::Rect::new(2, 20, 20, 1));
+                    let (anchor, edge) = if backwards { (10, 6) } else { (6, 10) };
+                    if source == "mouse" {
+                        for (kind, col) in [
+                            (MouseEventKind::Down(MouseButton::Left), anchor),
+                            (MouseEventKind::Drag(MouseButton::Left), edge),
+                            (MouseEventKind::Up(MouseButton::Left), edge),
+                        ] {
+                            app.handle_input_mouse_event(mouse(kind, col + 2, 20));
+                        }
+                    } else {
+                        app.handle_keys(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+                        for _ in 0..anchor {
+                            app.handle_keys(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+                        }
+                        let direction = if backwards {
+                            KeyCode::Left
+                        } else {
+                            KeyCode::Right
+                        };
+                        let (modifiers, count) = if source == "shift" {
+                            (KeyModifiers::SHIFT, 4)
+                        } else {
+                            (KeyModifiers::ALT | KeyModifiers::SHIFT, 1)
+                        };
+                        for _ in 0..count {
+                            app.handle_keys(KeyEvent::new(direction, modifiers));
+                        }
+                    }
+                    assert_eq!(app.input.get_selected_text(), "beta");
+                    assert_eq!(
+                        app.selection_action_bar.map(|state| state.target),
+                        Some(SelectionActionTarget::Input),
+                    );
+
+                    app.handle_keys(KeyEvent::new(arrow, KeyModifiers::NONE));
+                    assert!(!app.input.has_selection());
+                    assert!(app.selection_action_bar.is_none());
+                    assert_eq!(app.input.get_text(), "alpha beta");
+                    app.handle_keys(KeyEvent::new(KeyCode::Char('!'), KeyModifiers::NONE));
+                    assert_eq!(
+                        app.input.get_text(),
+                        if arrow == KeyCode::Left {
+                            "alpha !beta"
+                        } else {
+                            "alpha beta!"
+                        },
+                        "{source}, backwards={backwards}, arrow={arrow:?}",
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn input_selection_action_bar_shows_when_drag_releases_outside_input() {
         let mut app = test_app();
         app.last_frame_size = ratatui::layout::Rect::new(0, 0, 80, 24);
@@ -14553,6 +15306,7 @@ mod tests {
         app.chat_state.chat.scroll_offset = 0;
         let (permission_tx, _permission_rx) = tokio::sync::oneshot::channel();
         app.permission_dialog_state.enqueue(PermissionPrompt {
+            tool_call_id: None,
             tool_id: "list".to_string(),
             action: PermissionAction::List,
             permission: "external_directory".to_string(),
@@ -14560,7 +15314,9 @@ mod tests {
             target: Some("/tmp".to_string()),
             command: None,
             workdir: None,
+            workspace: "/tmp".to_string(),
             reason: "approval required".to_string(),
+            raw_input: serde_json::Value::Null,
             response_tx: permission_tx,
         });
         app.overlay_focus = OverlayFocus::PermissionDialog;
@@ -14705,10 +15461,19 @@ mod tests {
             Some("model")
         );
         assert_eq!(dialog.items.last().map(|item| item.key), Some('m'));
+        assert_eq!(
+            dialog.item_id_for_shortcut('p').as_deref(),
+            Some("provider")
+        );
+        assert_eq!(
+            dialog.item_id_for_shortcut('d').as_deref(),
+            Some("model_id")
+        );
+        assert_eq!(dialog.item_id_for_shortcut('c').as_deref(), Some("input"));
     }
 
     #[test]
-    fn copy_command_on_home_only_offers_model_id() {
+    fn copy_command_on_home_offers_provider_and_model_ids() {
         let mut app = test_app();
         app.base_focus = BaseFocus::Home;
 
@@ -14716,9 +15481,59 @@ mod tests {
 
         let dialog = app.copy_actions_dialog.as_ref().expect("copy dialog");
         assert_eq!(app.overlay_focus, OverlayFocus::CopyActions);
-        assert_eq!(dialog.items.len(), 1);
-        assert_eq!(dialog.items[0].id, "model");
-        assert_eq!(dialog.items[0].key, 'm');
+        assert_eq!(dialog.items.len(), 3);
+        assert_eq!(
+            dialog.item_id_for_shortcut('p').as_deref(),
+            Some("provider")
+        );
+        assert_eq!(
+            dialog.item_id_for_shortcut('d').as_deref(),
+            Some("model_id")
+        );
+        assert_eq!(dialog.item_id_for_shortcut('m').as_deref(), Some("model"));
+        assert_eq!(dialog.item_id_for_shortcut('c'), None);
+    }
+
+    #[test]
+    fn ctrl_x_c_on_home_only_offers_input_when_present() {
+        for draft in ["", " \n\t ", "draft prompt\nsecond line"] {
+            let mut app = test_app();
+            app.base_focus = BaseFocus::Home;
+            app.input.set_text(draft);
+
+            app.handle_keys(KeyEvent::new(
+                KeyCode::Char('x'),
+                event::KeyModifiers::CONTROL,
+            ));
+            assert_eq!(app.overlay_focus, OverlayFocus::WhichKey);
+            app.handle_keys(KeyEvent::new(KeyCode::Char('c'), event::KeyModifiers::NONE));
+
+            let dialog = app.copy_actions_dialog.as_ref().expect("home copy dialog");
+            assert_eq!(app.overlay_focus, OverlayFocus::CopyActions);
+            assert!(!app.which_key_state.is_visible());
+            assert_eq!(
+                dialog.items.len(),
+                if draft.trim().is_empty() { 3 } else { 4 }
+            );
+            assert_eq!(
+                dialog.item_id_for_shortcut('c').as_deref(),
+                if draft.trim().is_empty() {
+                    None
+                } else {
+                    Some("input")
+                }
+            );
+            for id in ["transcript", "id", "title"] {
+                assert!(!dialog.items.iter().any(|item| item.id == id));
+            }
+            assert_eq!(app.input.submission_text(), draft);
+
+            app.handle_keys(KeyEvent::new(KeyCode::Esc, event::KeyModifiers::NONE));
+            assert_eq!(app.overlay_focus, OverlayFocus::None);
+            assert!(app.copy_actions_dialog.is_none());
+            assert_eq!(app.base_focus, BaseFocus::Home);
+            assert_eq!(app.input.submission_text(), draft);
+        }
     }
 
     #[test]
@@ -14851,6 +15666,33 @@ mod tests {
         app.show_message_actions(0);
 
         assert!(message_action_names(&app).contains(&"Undo".to_string()));
+    }
+
+    #[test]
+    fn undo_user_message_persists_prefix_without_cloning_it() {
+        let mut app = test_app();
+        app.session_manager = SessionManager::new().with_history().unwrap();
+        let id = app.create_new_session(Some("Undo persistence".to_string()));
+        add_current_session_message(&mut app, crate::session::types::Message::user("keep"));
+        add_current_session_message(
+            &mut app,
+            crate::session::types::Message::assistant("answer"),
+        );
+        add_current_session_message(
+            &mut app,
+            crate::session::types::Message::user("restore input"),
+        );
+        let prefix_ptr = app.chat_state.chat.messages[0].content.as_ptr();
+        app.message_actions_index = Some(2);
+        app.execute_message_action("undo");
+        assert_eq!(app.chat_state.chat.messages.len(), 2);
+        assert_eq!(app.chat_state.chat.messages[0].content.as_ptr(), prefix_ptr);
+        assert_eq!(app.input.get_text(), "restore input");
+        let mut reopened = SessionManager::new().with_history().unwrap();
+        assert!(reopened.switch_session(&id));
+        assert_eq!(reopened.get_current_session().unwrap().messages.len(), 2);
+        // Remove only this test's generated session.
+        app.session_manager.delete_session(&id);
     }
 
     #[test]
@@ -16127,34 +16969,6 @@ mod tests {
         assert!(!persisted_messages[1].is_complete);
     }
 
-    #[test]
-    fn interruption_guidance_augments_the_request_system_prompt() {
-        let mut messages = vec![
-            crate::session::types::Message::system("base prompt"),
-            crate::session::types::Message::user("new request"),
-        ];
-
-        App::apply_turn_guidance(
-            &mut messages,
-            Some(App::INTERRUPTED_TURN_CONTINUATION_GUIDANCE),
-        );
-
-        assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0].role, crate::session::types::MessageRole::System);
-        assert!(messages[0].content.starts_with("base prompt\n\n"));
-        assert!(messages[0].content.contains("resume unfinished work"));
-    }
-
-    #[test]
-    fn no_interruption_guidance_leaves_messages_unchanged() {
-        let mut messages = vec![crate::session::types::Message::system("base prompt")];
-        let expected = messages.clone();
-
-        App::apply_turn_guidance(&mut messages, None);
-
-        assert_eq!(messages, expected);
-    }
-
     #[tokio::test(flavor = "multi_thread")]
     async fn queued_image_messages_submit_as_single_record_with_renumbered_placeholders() {
         let mut app = test_app();
@@ -16648,6 +17462,253 @@ mod tests {
         );
     }
 
+    // A current-thread runtime deliberately catches UI-side block_in_place:
+    // submitting must return without polling prompt setup or a provider request.
+    #[tokio::test]
+    async fn submit_appends_placeholder_without_replacing_history() {
+        let mut app = test_app();
+        app.session_manager = SessionManager::new().with_history().unwrap();
+        app.small_model = None;
+        let session_id = app.create_new_session(Some("Submit regression".to_string()));
+        app.append_user_message_to_current_session("old history".repeat(10_000), Vec::new());
+        app.append_user_message_to_current_session("new prompt".to_string(), Vec::new());
+        let old_content = app
+            .session_manager
+            .get_session_ref(&session_id)
+            .unwrap()
+            .messages[0]
+            .content
+            .as_ptr();
+        let colors = app.get_current_theme_colors();
+        app.chat_state
+            .chat
+            .ensure_render_cache(80, "model", &colors);
+
+        app.start_llm_streaming("new prompt").unwrap();
+
+        let session = app.session_manager.get_session_ref(&session_id).unwrap();
+        assert_eq!(session.messages.len(), 3);
+        assert_eq!(session.messages[0].content.as_ptr(), old_content);
+        let placeholder = &session.messages[2];
+        assert_eq!(
+            placeholder.role,
+            crate::session::types::MessageRole::Assistant
+        );
+        assert!(!placeholder.is_complete);
+        assert_eq!(placeholder.model.as_ref(), Some(&app.model));
+        assert_eq!(placeholder.provider.as_ref(), Some(&app.provider_name));
+        assert_eq!(placeholder.t0_ms, app.chat_state.chat.messages[2].t0_ms);
+        assert!(placeholder.t0_ms.is_some());
+        assert!(app.chat_state.chat.has_render_cache());
+
+        // Check disk too: the placeholder is durable before the async task runs.
+        let dao = crate::persistence::HistoryDAO::new().unwrap();
+        let db_id = app.session_manager.get_db_id(&session_id).unwrap();
+        let persisted = dao.get_messages(db_id).unwrap();
+        assert_eq!(persisted.len(), 3);
+        assert_eq!(persisted[2].id, placeholder.id);
+        assert_eq!(persisted[2].t0_ms, placeholder.t0_ms.map(|ms| ms as i64));
+        assert_eq!(persisted[2].model, placeholder.model);
+
+        // Cancel before yielding; no credentials, network or prompt setup needed.
+        app.stream_for_session_mut(&session_id)
+            .unwrap()
+            .cancel_token
+            .cancel();
+        tokio::task::yield_now().await;
+    }
+
+    /// Opt-in offline replay of a JSON array of persistence::Message records.
+    /// Never opens the live history database or polls a model request.
+    #[tokio::test]
+    #[ignore = "set CRABCODE_SUBMIT_BENCH_MESSAGES to an exported session JSON"]
+    async fn benchmark_long_session_submit() {
+        let path = std::env::var("CRABCODE_SUBMIT_BENCH_MESSAGES").unwrap();
+        let stored: Vec<crate::persistence::Message> =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let messages: Vec<crate::session::types::Message> = stored
+            .into_iter()
+            .map(|message| message.try_into().unwrap())
+            .collect();
+        let snapshot = |messages: &[crate::session::types::Message]| {
+            serde_json::to_value(
+                messages
+                    .iter()
+                    .cloned()
+                    .map(crate::persistence::Message::from)
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap()
+        };
+        let original_len = messages.len();
+        assert!(original_len > 0);
+        let mut app = test_app();
+        app.session_manager = SessionManager::new().with_history().unwrap();
+        app.small_model = None;
+        let session_id = app.create_new_session(Some("Offline submit benchmark".to_string()));
+        app.chat_state.chat.replace_messages(messages);
+        assert!(app.persist_chat_messages_for_session(&session_id));
+        // Drop every loaded view and manager: this is a cold application-level
+        // open, not a cold filesystem/SQLite page-cache measurement.
+        drop(app);
+        let mut app = test_app();
+        app.small_model = None;
+        let started = std::time::Instant::now();
+        app.session_manager = SessionManager::new().with_history().unwrap();
+        let manager_load = started.elapsed();
+        assert!(app.switch_to_session(&session_id));
+        let cold_open = started.elapsed();
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let cold_frame = started.elapsed();
+        assert_eq!(app.chat_state.chat.messages.len(), original_len);
+
+        let away_id = app.create_new_session(Some("Offline switch target".to_string()));
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let started = std::time::Instant::now();
+        assert!(app.switch_to_session(&session_id));
+        let warm_switch = started.elapsed();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let warm_frame = started.elapsed();
+        assert_eq!(app.chat_state.chat.messages.len(), original_len);
+        // Compare the loaded persistence round-trip, which normalizes legacy parts.
+        let original_messages = snapshot(&app.chat_state.chat.messages);
+        app.base_focus = BaseFocus::Chat;
+        // A long-running session already has a tokenizer from earlier turns.
+        app.chat_state
+            .chat
+            .prepare_streaming_token_counter(&app.model);
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        let started = std::time::Instant::now();
+        app.handle_message_input("Offline benchmark prompt".to_string());
+        let submit = started.elapsed();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let first_frame = started.elapsed();
+        app.stream_for_session_mut(&session_id)
+            .unwrap()
+            .cancel_token
+            .cancel();
+
+        assert_eq!(app.chat_state.chat.messages.len(), original_len + 2);
+        assert_eq!(
+            app.session_manager
+                .get_session_ref(&session_id)
+                .unwrap()
+                .messages
+                .len(),
+            original_len + 2
+        );
+
+        // Measure the removed full-history operations separately, on the same
+        // warmed transcript. These are not part of the optimized submit path.
+        let started = std::time::Instant::now();
+        assert!(app.persist_chat_messages_for_session(&session_id));
+        let full_save = started.elapsed();
+        let started = std::time::Instant::now();
+        app.chat_state.chat.mark_render_dirty();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let full_render = started.elapsed();
+        // Cancellation alone leaves is_streaming set. Finalize outside the
+        // undo interval, then warm the cache again before measuring truncation.
+        tokio::task::yield_now().await;
+        app.cancelled_streaming_session(&session_id);
+        assert!(!app.is_streaming);
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        assert!(app.chat_state.chat.has_render_cache());
+        let dao = crate::persistence::HistoryDAO::new().unwrap();
+        let db_id = app.session_manager.get_db_id(&session_id).unwrap();
+        let persisted_prefix =
+            serde_json::to_value(&dao.get_messages(db_id).unwrap()[..original_len]).unwrap();
+        app.message_actions_index = Some(original_len);
+        let started = std::time::Instant::now();
+        app.execute_message_action("undo");
+        let undo = started.elapsed();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let undo_frame = started.elapsed();
+        assert_eq!(app.chat_state.chat.messages.len(), original_len);
+        assert_eq!(app.input.get_text(), "Offline benchmark prompt");
+        assert_eq!(
+            app.session_manager
+                .get_session_ref(&session_id)
+                .unwrap()
+                .messages
+                .len(),
+            original_len
+        );
+        assert!(
+            serde_json::to_value(dao.get_messages(db_id).unwrap()).unwrap() == persisted_prefix
+        );
+        let mut reopened = SessionManager::new().with_history().unwrap();
+        assert!(reopened.switch_session(&session_id));
+        assert_eq!(
+            reopened.get_current_session().unwrap().messages.len(),
+            original_len
+        );
+        assert!(snapshot(&app.chat_state.chat.messages) == original_messages);
+        eprintln!(
+            "offline replay: messages={original_len}, manager-load={manager_load:?}, \
+             cold-open-total={cold_open:?}, cold-open-to-frame-total={cold_frame:?}, \
+             warm-switch={warm_switch:?}, warm-switch-to-frame-total={warm_frame:?}, \
+             submit={submit:?}, submit-to-frame-total={first_frame:?}, \
+             full-history save={full_save:?}, full-history redraw={full_render:?}, \
+             undo={undo:?}, undo-to-frame-total={undo_frame:?}"
+        );
+        assert!(app.session_manager.try_delete_session(&away_id).unwrap());
+        assert!(app.session_manager.try_delete_session(&session_id).unwrap());
+    }
+
+    #[test]
+    fn streaming_snapshot_preserves_original_model_before_finalization() {
+        let mut app = test_app();
+        let session_id = app.create_new_session(Some("Snapshot model".to_string()));
+        let mut previous = crate::session::types::Message::assistant("Earlier answer");
+        previous.model = Some("earlier-model".to_string());
+        app.chat_state.chat.add_message(previous);
+        app.chat_state
+            .chat
+            .add_message(crate::session::types::Message::user("Prompt"));
+        app.chat_state
+            .chat
+            .add_message(crate::session::types::Message::incomplete("Partial"));
+
+        let (_sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        app.session_view_states.get_mut(&session_id).unwrap().stream =
+            Some(SessionStreamState::new(
+                receiver,
+                tokio_util::sync::CancellationToken::new(),
+                Some("original-model".to_string()),
+                Some("original-provider".to_string()),
+                2,
+            ));
+        app.model = "new-model".to_string();
+        app.provider_name = "new-provider".to_string();
+
+        // Cover both the initial save and a later snapshot containing a new
+        // assistant message, without ever finalizing the streaming turn.
+        assert!(app.persist_chat_messages_for_session(&session_id));
+        app.chat_state
+            .chat
+            .add_message(crate::session::types::Message::incomplete("Continued"));
+        app.mark_streaming_snapshot_pending(&session_id);
+        app.maybe_persist_streaming_snapshot_for_session(&session_id, true);
+
+        let session = app.session_manager.get_session_ref(&session_id).unwrap();
+        assert_eq!(session.messages[0].model.as_deref(), Some("earlier-model"));
+        assert!(session.messages[1].model.is_none());
+        assert_eq!(session.messages.len(), 4);
+        for message in &session.messages[2..] {
+            assert!(!message.is_complete);
+            assert_eq!(message.model.as_deref(), Some("original-model"));
+            assert_eq!(message.provider.as_deref(), Some("original-provider"));
+            let persisted: crate::persistence::Message = message.clone().into();
+            let restored: crate::session::types::Message = persisted.try_into().unwrap();
+            assert_eq!(restored.model, message.model);
+            assert_eq!(restored.provider, message.provider);
+        }
+    }
+
     #[test]
     fn interrupted_stream_persists_partial_messages() {
         let mut app = test_app();
@@ -17042,6 +18103,158 @@ mod tests {
         assert!(!app.reject_chat_only_command_outside_chat("branch"));
     }
 
+    fn add_test_skill_autocomplete(app: &mut App, root: &std::path::Path) {
+        let agents = app
+            .agent_registry
+            .visible_subagents()
+            .into_iter()
+            .map(|agent| crate::autocomplete::Suggestion::agent(&agent.name, &agent.description))
+            .collect();
+        app.input.autocomplete = Some(
+            AutoComplete::new_at_with_file_config(
+                crate::autocomplete::CommandAuto::new(&app.command_registry),
+                root,
+                false,
+                Vec::new(),
+            )
+            .with_agents(agents)
+            .with_skills(vec![crate::autocomplete::Suggestion::skill(
+                "codebase-design",
+                "Design deep modules",
+            )]),
+        );
+    }
+
+    #[test]
+    fn unknown_slash_prompts_are_messages_and_known_commands_remain_commands() {
+        let mut app = test_app();
+        for text in ["/", "/not-a-command explain this", "/tmp/example.txt"] {
+            assert_eq!(
+                app.parse_prompt_input(text),
+                InputType::Message(text.to_string())
+            );
+        }
+        for text in ["/models", "/compact", "/branch"] {
+            assert!(matches!(
+                app.parse_prompt_input(text),
+                InputType::Command(_)
+            ));
+        }
+        app.command_registry
+            .register(crate::command::registry::Command {
+                name: "codebase-design".to_string(),
+                description: "Design deep modules".to_string(),
+                handler: crate::command::handlers::handle_skill_command,
+                hidden_tokens: Vec::new(),
+                chat_only: false,
+            });
+        app.command_registry
+            .hide_from_autocomplete("codebase-design");
+        assert!(matches!(
+            app.parse_prompt_input("/codebase-design what is it"),
+            InputType::Command(_)
+        ));
+    }
+
+    #[test]
+    fn skill_mentions_are_chat_prompts_and_agent_mentions_still_delegate() {
+        let root = tempfile::tempdir().unwrap();
+        let mut app = test_app();
+        add_test_skill_autocomplete(&mut app, root.path());
+        for text in [
+            "@codebase-design what is it",
+            "@CODEBASE-DESIGN",
+            "Use @codebase-design",
+        ] {
+            assert_eq!(
+                app.parse_prompt_input(text),
+                InputType::Message(text.to_string())
+            );
+        }
+        for text in ["@explore find the parser", "@not-an-agent find the parser"] {
+            assert!(matches!(
+                app.parse_prompt_input(text),
+                InputType::AgentMention(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn skill_suggestions_fill_without_submitting_and_match_remote_discovery() {
+        let root = tempfile::tempdir().unwrap();
+        let mut app = test_app();
+        add_test_skill_autocomplete(&mut app, root.path());
+        app.input.set_text("@CODE");
+        let suggestions = app.input.get_autocomplete_suggestions(false);
+        assert_eq!(
+            suggestions,
+            app.remote_autocomplete_suggestions("mention", "CODE", false)
+        );
+        assert_eq!(suggestions.len(), 1);
+        assert_eq!(
+            suggestions[0].kind,
+            crate::autocomplete::SuggestionKind::Skill
+        );
+        assert!(app
+            .remote_autocomplete_suggestions("slash", "codebase", false)
+            .is_empty());
+        set_suggestions(&mut app.suggestions_popup_state, suggestions);
+        app.autocomplete_and_submit();
+        assert_eq!(app.input.get_text(), "@codebase-design ");
+        assert!(app.session_manager.get_current_session_id().is_none());
+        assert!(!is_suggestions_visible(&app.suggestions_popup_state));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unknown_slash_and_skill_prompts_use_the_normal_busy_session_queue() {
+        let root = tempfile::tempdir().unwrap();
+        let mut app = test_app();
+        add_test_skill_autocomplete(&mut app, root.path());
+        let session_id = app.create_new_session(Some("Prompt fallback queue".to_string()));
+        app.base_focus = BaseFocus::Chat;
+        let (_sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        app.session_view_states.get_mut(&session_id).unwrap().stream =
+            Some(SessionStreamState::new(
+                receiver,
+                tokio_util::sync::CancellationToken::new(),
+                Some("test-model".to_string()),
+                Some("test-provider".to_string()),
+                0,
+            ));
+        app.is_streaming = true;
+        app.input.set_text("/");
+        app.update_suggestions();
+        assert!(is_suggestions_visible(&app.suggestions_popup_state));
+        app.handle_keys(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.input.is_empty());
+        app.input.set_text("/not-a-command explain this");
+        app.handle_keys(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.input.is_empty());
+        app.input.set_text("@codebase-design what is it");
+        app.handle_keys(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.input.is_empty());
+        let returned_id = app
+            .remote_submit_input("/remote-unknown explain".to_string())
+            .await
+            .unwrap();
+        assert_eq!(returned_id, session_id);
+        let returned_id = app
+            .remote_submit_input("@codebase-design help".to_string())
+            .await
+            .unwrap();
+        assert_eq!(returned_id, session_id);
+        assert_eq!(
+            app.queued_message_previews_for_current_session(),
+            vec![
+                "/",
+                "/not-a-command explain this",
+                "@codebase-design what is it",
+                "/remote-unknown explain",
+                "@codebase-design help",
+            ]
+        );
+    }
+
     #[test]
     fn compaction_result_is_applied_from_receiver() {
         let mut app = test_app();
@@ -17183,62 +18396,6 @@ mod tests {
     }
 
     #[test]
-    fn streaming_usage_base_caches_completed_messages_and_tracks_appends() {
-        let mut app = test_app();
-        app.chat_state
-            .chat
-            .add_message(crate::session::types::Message::user("hello there"));
-        let mut done = crate::session::types::Message::assistant("finished answer");
-        done.token_count = Some(100);
-        app.chat_state.chat.add_message(done);
-        app.chat_state
-            .chat
-            .add_message(crate::session::types::Message::incomplete("streaming..."));
-
-        let fresh = |app: &App| -> usize {
-            let messages = &app.chat_state.chat.messages;
-            let streaming_idx = messages.iter().rposition(|message| {
-                message.role == crate::session::types::MessageRole::Assistant
-                    && !message.is_complete
-            });
-            messages
-                .iter()
-                .enumerate()
-                .map(|(idx, message)| {
-                    if Some(idx) == streaming_idx {
-                        app.chat_state.chat.streaming_token_count()
-                    } else {
-                        crate::session::compaction::message_context_tokens(message)
-                    }
-                })
-                .sum()
-        };
-
-        let expected = fresh(&app);
-        assert_eq!(app.streaming_context_tokens_cached(), expected);
-        // Cached path must agree with a fresh walk on repeat calls.
-        assert_eq!(app.streaming_context_tokens_cached(), expected);
-        let cached_base = app
-            .cached_usage_streaming_base
-            .clone()
-            .expect("base cached");
-
-        // Appending a message invalidates the cached base.
-        let mut extra = crate::session::types::Message::assistant("more context");
-        extra.token_count = Some(40);
-        let last_idx = app.chat_state.chat.messages.len() - 1;
-        app.chat_state.chat.messages.insert(last_idx, extra);
-        let expected_after = fresh(&app);
-        assert_eq!(app.streaming_context_tokens_cached(), expected_after);
-        assert_ne!(
-            app.cached_usage_streaming_base,
-            Some(cached_base),
-            "cache should refresh when the message count changes"
-        );
-        assert!(expected_after > expected);
-    }
-
-    #[test]
     fn switching_sessions_keeps_family_render_caches_and_releases_others() {
         let mut app = test_app();
         let colors = app.get_current_theme_colors();
@@ -17288,6 +18445,56 @@ mod tests {
             .session_view_states
             .get(&other)
             .is_some_and(|state| !state.chat.has_render_cache()));
+    }
+
+    #[test]
+    fn opening_history_then_returning_keeps_messages_and_warm_cache() {
+        use crate::session::types::Message;
+        let mut app = test_app();
+        let colors = app.get_current_theme_colors();
+        let first = app.create_new_session(Some("Synthetic history".to_string()));
+        let messages: Vec<_> = (0..80)
+            .flat_map(|idx| {
+                [
+                    Message::user(format!("Question {idx}")),
+                    Message::assistant(
+                        "Answer with https://example.com and **markdown**".repeat(20),
+                    ),
+                ]
+            })
+            .collect();
+        app.session_manager
+            .replace_session_messages(&first, messages.clone())
+            .unwrap();
+        // Simulate an as-yet unhydrated history (not an already-live chat).
+        app.chat_state.chat.clear();
+        app.session_view_states.remove(&first);
+        app.load_session_view_state(&first);
+        assert_eq!(app.chat_state.chat.messages.len(), messages.len());
+        assert_eq!(
+            app.chat_state.chat.messages[159].content,
+            messages[159].content
+        );
+        app.chat_state
+            .chat
+            .ensure_render_cache(80, "model", &colors);
+        let allocation = app.chat_state.chat.messages.as_ptr();
+
+        // An existing unrelated session, so the public switch path does not
+        // create or save a second copy of the first history.
+        let second = app
+            .session_manager
+            .create_session(Some("Other".to_string()));
+        app.session_manager.switch_session(&first);
+        assert!(app.switch_to_session(&second));
+        assert!(app.session_view_states[&first].chat.has_render_cache());
+        assert!(app.switch_to_session(&first));
+        assert_eq!(app.chat_state.chat.messages.as_ptr(), allocation);
+        assert!(app.chat_state.chat.has_render_cache());
+        app.chat_state
+            .chat
+            .ensure_render_cache(80, "model", &colors);
+        assert_eq!(app.chat_state.chat.messages.len(), messages.len());
     }
 
     #[test]
@@ -17539,6 +18746,87 @@ mod tests {
 
         assert_eq!(app.overlay_focus, OverlayFocus::None);
         assert!(!app.chat_state.chat.thinking_visible());
+    }
+
+    #[test]
+    fn ctrl_d_quits_when_input_empty() {
+        let mut app = test_app();
+        app.base_focus = BaseFocus::Chat;
+        app.overlay_focus = OverlayFocus::None;
+        assert!(app.running);
+        assert!(!app.input.has_draft_content());
+
+        app.handle_keys(KeyEvent::new(
+            KeyCode::Char('d'),
+            event::KeyModifiers::CONTROL,
+        ));
+
+        assert!(!app.running);
+    }
+
+    #[test]
+    fn ctrl_d_does_not_quit_when_input_has_text() {
+        let mut app = test_app();
+        app.base_focus = BaseFocus::Chat;
+        app.overlay_focus = OverlayFocus::None;
+        app.input.insert_str("draft prompt");
+
+        app.handle_keys(KeyEvent::new(
+            KeyCode::Char('d'),
+            event::KeyModifiers::CONTROL,
+        ));
+
+        // Non-empty input keeps emacs delete-forward behavior instead of quitting.
+        assert!(app.running);
+        assert_eq!(app.input.get_text(), "draft prompt");
+    }
+
+    #[test]
+    fn ctrl_d_does_not_quit_when_connect_dialog_focused() {
+        let mut app = test_app();
+        app.base_focus = BaseFocus::Chat;
+        app.overlay_focus = OverlayFocus::ConnectDialog;
+        app.connect_dialog_state.dialog.show();
+        assert!(app.input.is_empty());
+
+        app.handle_keys(KeyEvent::new(
+            KeyCode::Char('d'),
+            event::KeyModifiers::CONTROL,
+        ));
+
+        // ConnectDialog reserves Ctrl+D for Disconnect.
+        assert!(app.running);
+    }
+
+    #[test]
+    fn ctrl_d_does_not_quit_when_sessions_dialog_focused() {
+        let mut app = test_app();
+        app.base_focus = BaseFocus::Chat;
+        app.open_sessions_dialog();
+        assert_eq!(app.overlay_focus, OverlayFocus::SessionsDialog);
+        assert!(app.input.is_empty());
+
+        app.handle_keys(KeyEvent::new(
+            KeyCode::Char('d'),
+            event::KeyModifiers::CONTROL,
+        ));
+
+        assert!(app.running);
+    }
+
+    #[test]
+    fn ctrl_d_quits_when_suggestions_popup_open_and_input_empty() {
+        let mut app = test_app();
+        app.base_focus = BaseFocus::Chat;
+        app.overlay_focus = OverlayFocus::SuggestionsPopup;
+        assert!(!app.input.has_draft_content());
+
+        app.handle_keys(KeyEvent::new(
+            KeyCode::Char('d'),
+            event::KeyModifiers::CONTROL,
+        ));
+
+        assert!(!app.running);
     }
 
     #[test]

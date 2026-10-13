@@ -232,6 +232,7 @@ impl RecordedUsage {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Message {
+    pub id: String,
     pub role: MessageRole,
     pub content: String,
     pub reasoning: Option<String>,
@@ -248,17 +249,32 @@ pub struct Message {
     pub t1_ms: Option<u64>,
     pub tn_ms: Option<u64>,
     pub output_tokens: Option<usize>,
+    pub input_tokens: Option<usize>,
+    pub cache_read_tokens: Option<usize>,
+    pub cache_write_tokens: Option<usize>,
+    pub cost: Option<f64>,
+    pub usage_authoritative: bool,
     /// Precomputed tokens/s (OpenCode inter-token aggregate). Prefer over
     /// recomputing `output_tokens / duration_ms`.
     pub tokens_per_sec: Option<f64>,
     pub model: Option<String>,
     pub provider: Option<String>,
     pub local_image_paths: Vec<String>,
+    pub local_audio_paths: Vec<String>,
     pub compaction_stats: Option<CompactionStats>,
     pub was_interrupted: bool,
 }
 
 impl Message {
+    pub fn apply_usage(&mut self, usage: crate::aisdk::chunk::TokenUsage, cost: Option<f64>) {
+        self.input_tokens = Some(usize::try_from(usage.input).unwrap_or(usize::MAX));
+        self.output_tokens = Some(usize::try_from(usage.output).unwrap_or(usize::MAX));
+        self.cache_read_tokens = Some(usize::try_from(usage.cache_read).unwrap_or(usize::MAX));
+        self.cache_write_tokens = Some(usize::try_from(usage.cache_write).unwrap_or(usize::MAX));
+        self.cost = cost;
+        self.usage_authoritative = true;
+    }
+
     pub fn new(role: MessageRole, content: impl Into<String>) -> Self {
         let content = content.into();
         let parts = if content.is_empty() {
@@ -268,6 +284,7 @@ impl Message {
         };
 
         Self {
+            id: cuid2::create_id(),
             role,
             content,
             reasoning: None,
@@ -282,10 +299,16 @@ impl Message {
             t1_ms: None,
             tn_ms: None,
             output_tokens: None,
+            input_tokens: None,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            cost: None,
+            usage_authoritative: false,
             tokens_per_sec: None,
             model: None,
             provider: None,
             local_image_paths: Vec::new(),
+            local_audio_paths: Vec::new(),
             compaction_stats: None,
             was_interrupted: false,
         }
@@ -316,6 +339,7 @@ impl Message {
         };
 
         Self {
+            id: cuid2::create_id(),
             role: MessageRole::Assistant,
             content,
             reasoning: None,
@@ -330,10 +354,16 @@ impl Message {
             t1_ms: None,
             tn_ms: None,
             output_tokens: None,
+            input_tokens: None,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            cost: None,
+            usage_authoritative: false,
             tokens_per_sec: None,
             model: None,
             provider: None,
             local_image_paths: Vec::new(),
+            local_audio_paths: Vec::new(),
             compaction_stats: None,
             was_interrupted: false,
         }

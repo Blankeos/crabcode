@@ -4,6 +4,10 @@ default:
 check-aisdk-boundary:
     bash scripts/check-aisdk-boundary.sh
 
+[doc('Check registry publishing workflow and npm archive compatibility')]
+test-release:
+    bun test scripts/release-workflow.test.ts npm/install.test.js
+
 dev:
     cargo r
 

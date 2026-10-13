@@ -15,7 +15,7 @@ In-tree AI SDK used by the host binary (`mod aisdk` in `src/main.rs`).
 3. Host app imports via `crate::aisdk::...` (binary module path), not an external crate dep.
 4. **No hard coupling to the host product.** Code here must not depend on product-specific concepts (TUI, sessions, tools registry, prefs DB, agent loop, product config, host `crate::` app modules, etc.). Keep this layer a generic multi-provider AI SDK — same spirit as Vercel AI SDK for Rust: providers, messages, streams, tools, retries. Product-specific behavior belongs outside this tree (call sites in the app).
 5. **Capabilities ≠ host policy.** Expose provider-executed features as ordinary tools (e.g. `openai::tools::web_search()`, `xai::tools::x_search()` via `ToolTransport`). Do **not** encode host preferences like `websearch.native` / `.hosted_web_search(true)` inside aisdk. The host maps policy → `HostedSearchSelection` / tools to pass. Providers emit billed `ChunkType::Usage(TokenUsage)` (and optional `ResponseCompleted.usage`); pricing stays in the host.
-6. **Logging:** use `crate::log::log(...)` (host-injected via `aisdk::log::set_logger`). Never call host `emit_log!` from this tree.
+6. **Logging:** use `crate::log::log(...)` (host-injected via `aisdk::log::set_logger`). Never call host `emit_log!` or write directly to stdout/stderr (`println!`, `eprintln!`, `dbg!`, etc.) from this tree; console writes can corrupt host terminal UIs.
 7. **Debug SSE dumps:** feature-gated behind `aisdk-sse-debug` (optional path via `AISDK_SSE_DEBUG_LOG`).
 8. **Boundary check:** run `scripts/check-aisdk-boundary.sh` (also documented in root `AGENTS.md`).
 
@@ -38,5 +38,9 @@ Done for packaging/host hooks:
 - Absolute `crate::{chunk,error,...}` paths are crate-root-shaped (host re-exports them today)
 - Product-leaky debug path renamed/feature-gated
 - Product-flavored comments/tests scrubbed
+- Typed terminal stop reasons include normal completion, max tokens, refusal, hooks, and errors
+- Normalized provider usage events retain input, output, cache-read, and cache-write token accounting across multi-step turns
+- User messages support typed image and WAV/MP3 audio inputs; audio is serialized through verified Chat Completions `input_audio` content parts
+- `stream_with_tools_options` accepts generic request-loop policy such as request-local stale tool-output pruning; the host maps product configuration into those options
 
 Keep app glue outside this tree (`src/tools/aisdk_bridge.rs`, `src/llm/*`).

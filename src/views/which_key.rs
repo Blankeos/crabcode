@@ -84,6 +84,11 @@ impl WhichKeyState {
                 target: BindingTarget::Action(WhichKeyAction::ShowSessions),
             },
             KeyBinding {
+                key: "c".to_string(),
+                description: "Open Copy dialog".to_string(),
+                target: BindingTarget::Action(WhichKeyAction::ShowCopyDialog),
+            },
+            KeyBinding {
                 key: "n".to_string(),
                 description: "Create new session".to_string(),
                 target: BindingTarget::Action(WhichKeyAction::NewSession),
@@ -136,11 +141,6 @@ impl WhichKeyState {
                 key: "r".to_string(),
                 description: "Edit pending queued message".to_string(),
                 target: BindingTarget::Action(WhichKeyAction::RecallPending),
-            },
-            KeyBinding {
-                key: "c".to_string(),
-                description: "Open Copy dialog".to_string(),
-                target: BindingTarget::Action(WhichKeyAction::ShowCopyDialog),
             },
             KeyBinding {
                 key: "k".to_string(),
@@ -288,6 +288,28 @@ mod tests {
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn c_opens_copy_dialog_on_home_and_chat() {
+        for chat_active in [false, true] {
+            let mut state = WhichKeyState::new();
+            state.set_chat_active(chat_active);
+            state.show();
+            assert_eq!(
+                state.handle_key_event(key(KeyCode::Char('c'))),
+                WhichKeyAction::ShowCopyDialog
+            );
+            assert!(!state.is_visible());
+            assert_eq!(
+                state
+                    .current_bindings()
+                    .iter()
+                    .filter(|b| b.key == "c")
+                    .count(),
+                1
+            );
+        }
     }
 
     #[test]

@@ -6,6 +6,13 @@ pub(crate) fn is_prefixed_response_item_id(id: &str) -> bool {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AudioContent {
+    pub data: String,
+    pub format: String,
+    pub media_type: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "role")]
 pub enum Message {
     #[serde(rename = "system")]
@@ -35,6 +42,7 @@ impl Message {
         Self::User(UserMessage {
             content: content.into(),
             images: Vec::new(),
+            audios: Vec::new(),
         })
     }
 
@@ -42,6 +50,19 @@ impl Message {
         Self::User(UserMessage {
             content: content.into(),
             images,
+            audios: Vec::new(),
+        })
+    }
+
+    pub fn user_with_attachments(
+        content: impl Into<String>,
+        images: Vec<ImageContent>,
+        audios: Vec<AudioContent>,
+    ) -> Self {
+        Self::User(UserMessage {
+            content: content.into(),
+            images,
+            audios,
         })
     }
 
@@ -159,6 +180,8 @@ pub struct UserMessage {
     pub content: String,
     #[serde(default)]
     pub images: Vec<ImageContent>,
+    #[serde(default)]
+    pub audios: Vec<AudioContent>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -231,6 +254,7 @@ impl From<String> for UserMessage {
         Self {
             content,
             images: Vec::new(),
+            audios: Vec::new(),
         }
     }
 }
@@ -240,6 +264,7 @@ impl From<&str> for UserMessage {
         Self {
             content: content.to_string(),
             images: Vec::new(),
+            audios: Vec::new(),
         }
     }
 }

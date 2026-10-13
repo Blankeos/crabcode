@@ -19,5 +19,8 @@ publish-jobs = ["homebrew"]
 # cargo-dist validates generated CI files byte-for-byte by default; this allows
 # intentional workflow edits such as changelog/release and Homebrew publishing customizations.
 allow-dirty = ["ci"]
+# Registry clients support gzip tarballs, not cargo-dist's default xz archives.
+unix-archive = ".tar.gz"
+windows-archive = ".zip"
 # Target platforms to build apps for (Rust target-triple syntax)
 targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]

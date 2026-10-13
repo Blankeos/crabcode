@@ -28,6 +28,8 @@ import {
   isCursorOnFirstPromptLine,
   isCursorOnLastPromptLine,
   isSupportedImageFile,
+  isRegisteredSlashCommand,
+  shouldSubmitLiteralSlash,
   loadPromptHistory,
   mergePromptHistoryEntries,
   messagePromptHistoryEntries,
@@ -127,6 +129,7 @@ export default function RemoteClient() {
   const [promptHistoryDraft, setPromptHistoryDraft] = createSignal("")
   const [composerSuggestions, setComposerSuggestions] = createSignal<RemoteSuggestion[]>([])
   const [composerSuggestionIndex, setComposerSuggestionIndex] = createSignal(0)
+  const [composerSelectionExplicit, setComposerSelectionExplicit] = createSignal(false)
   const [completionTrigger, setCompletionTrigger] = createSignal<CompletionTrigger | null>(null)
   const [completionRevision, setCompletionRevision] = createSignal(0)
   const [mascotFrame, setMascotFrame] = createSignal(0)
@@ -214,6 +217,7 @@ export default function RemoteClient() {
     if (!trigger) {
       setComposerSuggestions([])
       setComposerSuggestionIndex(0)
+      setComposerSelectionExplicit(false)
       completionResultsKey = ""
       return
     }
@@ -222,6 +226,7 @@ export default function RemoteClient() {
     const resultsKey = `${trigger.kind}:${trigger.range[0]}:${trigger.query}`
     const resetSelection = resultsKey !== completionResultsKey
     completionResultsKey = resultsKey
+    if (resetSelection) setComposerSelectionExplicit(false)
     void api()
       .autocomplete(trigger.kind, trigger.query, Boolean(state()?.current_session_id))
       .then((suggestions) => {
@@ -839,9 +844,15 @@ export default function RemoteClient() {
     setPromptHistoryDraft("")
   }
 
+  const isPromptSlashCommand = (text: string) => {
+    const parsed = parseSlashCommand(text)
+    return isRegisteredSlashCommand(text, state()?.command_names ?? []) ||
+      (parsed !== null && (sameToken(parsed.name, "copy") || sameToken(parsed.name, "models")))
+  }
+
   const addPromptHistoryEntry = (text: string) => {
     const entry = normalizePromptHistoryEntry(text)
-    if (!entry || parseSlashCommand(entry)) return
+    if (!entry || isPromptSlashCommand(entry)) return
 
     setBrowserPromptHistory((current) => {
       const next = [entry, ...current.filter((item) => item !== entry)].slice(0, MAX_PROMPT_HISTORY)
@@ -1053,7 +1064,7 @@ export default function RemoteClient() {
       clearComposer()
       return
     }
-    if (attachments.length > 0 && parseSlashCommand(text)) {
+    if (attachments.length > 0 && isPromptSlashCommand(text)) {
       toast.error("Images can only be attached to chat prompts.")
       return
     }
@@ -1061,7 +1072,7 @@ export default function RemoteClient() {
     clearComposer()
 
     const queueWhileStreaming =
-      Boolean(state()?.is_streaming) && !parseSlashCommand(text)
+      Boolean(state()?.is_streaming) && !isPromptSlashCommand(text)
     if (queueWhileStreaming) {
       setOptimisticQueuedMessages((messages) => [...messages, text])
     } else {
@@ -1519,7 +1530,7 @@ export default function RemoteClient() {
     const replacement =
       suggestion.kind === "command"
         ? `/${suggestion.replacement} `
-        : suggestion.kind === "agent"
+        : suggestion.kind === "agent" || suggestion.kind === "skill"
           ? `@${suggestion.replacement} `
           : `${quoteCompletionPath(suggestion.replacement)} `
     const next = `${text.slice(0, start)}${replacement}${text.slice(end)}`
@@ -1549,11 +1560,13 @@ export default function RemoteClient() {
     if (composerSuggestions().length > 0) {
       if (event.key === "ArrowDown") {
         event.preventDefault()
+        setComposerSelectionExplicit(true)
         setComposerSuggestionIndex((index) => (index + 1) % composerSuggestions().length)
         return
       }
       if (event.key === "ArrowUp") {
         event.preventDefault()
+        setComposerSelectionExplicit(true)
         setComposerSuggestionIndex((index) =>
           (index - 1 + composerSuggestions().length) % composerSuggestions().length
         )
@@ -1561,6 +1574,10 @@ export default function RemoteClient() {
       }
       if (event.key === "Tab" || (event.key === "Enter" && !event.shiftKey)) {
         event.preventDefault()
+        if (event.key === "Enter" && shouldSubmitLiteralSlash(prompt(), composerSelectionExplicit())) {
+          if (enterSubmitsPrompt()) event.currentTarget.form?.requestSubmit()
+          return
+        }
         const selected = composerSuggestions()[composerSuggestionIndex()]
         if (selected) chooseComposerSuggestion(selected)
         return
@@ -1791,7 +1808,10 @@ export default function RemoteClient() {
       onPromptPaste: handlePromptPaste,
       suggestions: composerSuggestions,
       suggestionIndex: composerSuggestionIndex,
-      setSuggestionIndex: setComposerSuggestionIndex,
+      setSuggestionIndex: (index) => {
+        setComposerSelectionExplicit(true)
+        setComposerSuggestionIndex(index)
+      },
       setSuggestionsRef: (element) => {
         composerSuggestionsRef = element
       },

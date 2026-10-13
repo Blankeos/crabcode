@@ -391,6 +391,11 @@ async function fetchThemes() {
 
     try {
       const themeJson = JSON.parse(themeContent) as Record<string, unknown>
+      // Vercel uses the same blue accent for bullet and numbered list markers.
+      // Preserve this local adjustment when refreshing the upstream themes.
+      if (baseId === 'vercel' && themeJson.theme?.markdownListEnumeration) {
+        themeJson.theme.markdownListItem = structuredClone(themeJson.theme.markdownListEnumeration)
+      }
       injectTextWeak(themeJson)
       solidifyBackground(themeJson)
       injectAppearance(themeJson)

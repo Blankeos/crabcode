@@ -98,6 +98,28 @@ pub struct DialogAction {
     pub key: String,
 }
 
+fn dialog_action_key(hint: &str) -> Option<KeyEvent> {
+    let (hint, modifiers) = match hint.strip_prefix("ctrl+") {
+        Some(hint) => (hint, KeyModifiers::CONTROL),
+        None => (hint, KeyModifiers::NONE),
+    };
+    let code = match hint {
+        "esc" => KeyCode::Esc,
+        "enter" => KeyCode::Enter,
+        "tab" => KeyCode::Tab,
+        "space" => KeyCode::Char(' '),
+        _ => {
+            let mut chars = hint.chars();
+            let ch = chars.next()?;
+            if chars.next().is_some() {
+                return None;
+            }
+            KeyCode::Char(ch)
+        }
+    };
+    Some(KeyEvent::new(code, modifiers))
+}
+
 #[derive(Debug)]
 pub struct Dialog {
     pub title: String,
@@ -117,6 +139,7 @@ pub struct Dialog {
     scrollbar_drag_offset: Option<u16>,
     pub visible_row_count: usize,
     pub actions: Vec<DialogAction>,
+    shortcut_areas: Vec<(Rect, KeyEvent)>,
     bottom_gap_height: u16,
     pub position: DialogPosition,
     max_height: Option<u16>,
@@ -157,6 +180,7 @@ impl Dialog {
             scrollbar_drag_offset: None,
             visible_row_count: 0,
             actions: Vec::new(),
+            shortcut_areas: Vec::new(),
             bottom_gap_height: 1,
             position: DialogPosition::Center,
             max_height: None,
@@ -340,6 +364,7 @@ impl Dialog {
 
     pub fn hide(&mut self) {
         self.visible = false;
+        self.shortcut_areas.clear();
         self.search_query.clear();
         self.search_textarea = TextArea::default();
         self.search_textarea.set_placeholder_text("Search");
@@ -1343,6 +1368,16 @@ impl Dialog {
             return false;
         }
 
+        // View-specific shortcuts are routed by the app through its keyboard
+        // handler. Closing also works for callers using the component directly.
+        if self
+            .mouse_key_event(event)
+            .is_some_and(|key| key.code == KeyCode::Esc)
+        {
+            self.hide();
+            return true;
+        }
+
         use ratatui::layout::Position;
         let point = Position::new(event.column, event.row);
 
@@ -1472,6 +1507,22 @@ impl Dialog {
         }
         use ratatui::layout::Position;
         self.dialog_area.contains(Position::new(column, row))
+    }
+
+    /// Translate a click on a rendered hint into its keyboard equivalent.
+    /// Callers must dispatch it through their normal key handler, not the list
+    /// selection path: footer actions can have view-specific side effects.
+    pub fn mouse_key_event(&self, event: MouseEvent) -> Option<KeyEvent> {
+        if !self.visible
+            || self.is_dragging_scrollbar
+            || !matches!(event.kind, MouseEventKind::Down(MouseButton::Left))
+        {
+            return None;
+        }
+        let point = ratatui::layout::Position::new(event.column, event.row);
+        self.shortcut_areas
+            .iter()
+            .find_map(|(area, key)| area.contains(point).then_some(*key))
     }
 
     pub fn item_index_at_position(&self, column: u16, row: u16) -> Option<usize> {
@@ -1642,6 +1693,7 @@ impl Dialog {
     }
 
     pub fn render(&mut self, frame: &mut Frame, area: Rect, colors: ThemeColors) {
+        self.shortcut_areas.clear();
         if !self.visible {
             return;
         }
@@ -1729,6 +1781,17 @@ impl Dialog {
         )]))
         .alignment(ratatui::layout::Alignment::Right);
         frame.render_widget(esc_paragraph, header_chunks[1]);
+        let esc_area = Rect::new(
+            header_chunks[1]
+                .right()
+                .saturating_sub(3)
+                .max(header_chunks[1].x),
+            header_chunks[1].y,
+            header_chunks[1].width.min(3),
+            header_chunks[1].height,
+        );
+        self.shortcut_areas
+            .push((esc_area, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
 
         if self.search_visible {
             self.search_textarea.set_style(
@@ -1889,8 +1952,10 @@ impl Dialog {
             colors.text_weak,
         );
 
-        let footer_paragraph = Paragraph::new(self.footer_lines(chunks[5].width, colors))
-            .alignment(ratatui::layout::Alignment::Left);
+        let (footer_lines, footer_shortcuts) = self.footer_layout(chunks[5], colors);
+        self.shortcut_areas.extend(footer_shortcuts);
+        let footer_paragraph =
+            Paragraph::new(footer_lines).alignment(ratatui::layout::Alignment::Left);
         frame.render_widget(footer_paragraph, chunks[5]);
 
         self.place_terminal_cursor(frame, &chunks, &list_content_area);
@@ -1929,12 +1994,22 @@ impl Dialog {
     }
 
     pub fn footer_lines(&self, width: u16, colors: ThemeColors) -> Vec<Line<'static>> {
+        self.footer_layout(Rect::new(0, 0, width, self.footer_height()), colors)
+            .0
+    }
+
+    fn footer_layout(
+        &self,
+        area: Rect,
+        colors: ThemeColors,
+    ) -> (Vec<Line<'static>>, Vec<(Rect, KeyEvent)>) {
         if self.actions.is_empty() {
-            return vec![Line::from(vec![])];
+            return (vec![Line::from(vec![])], Vec::new());
         }
 
         let max_lines = self.footer_height() as usize;
-        let max_width = width.max(1) as usize;
+        let max_width = area.width.max(1) as usize;
+        let mut shortcuts = Vec::new();
         let mut lines: Vec<Vec<Span<'static>>> = Vec::new();
         let mut current: Vec<Span<'static>> = Vec::new();
         let mut current_width = 0usize;
@@ -1955,6 +2030,20 @@ impl Dialog {
             if !current.is_empty() {
                 current.push(Span::raw("  "));
                 current_width += 2;
+            }
+
+            if current_width < area.width as usize && lines.len() < area.height as usize {
+                if let Some(key) = dialog_action_key(&action.key) {
+                    shortcuts.push((
+                        Rect::new(
+                            area.x + current_width as u16,
+                            area.y + lines.len() as u16,
+                            action_width.min(area.width as usize - current_width) as u16,
+                            1,
+                        ),
+                        key,
+                    ));
+                }
             }
 
             current.push(Span::styled(
@@ -1978,7 +2067,7 @@ impl Dialog {
             lines.push(Vec::new());
         }
 
-        lines.into_iter().map(Line::from).collect()
+        (lines.into_iter().map(Line::from).collect(), shortcuts)
     }
 }
 
@@ -2008,6 +2097,7 @@ impl Clone for Dialog {
             scrollbar_drag_offset: self.scrollbar_drag_offset,
             visible_row_count: self.visible_row_count,
             actions: self.actions.clone(),
+            shortcut_areas: self.shortcut_areas.clone(),
             bottom_gap_height: self.bottom_gap_height,
             position: self.position,
             max_height: self.max_height,
@@ -2032,6 +2122,170 @@ enum DialogFocusRow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn render_clickable_dialog(dialog: &mut Dialog, width: u16) -> ratatui::buffer::Buffer {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 30)).unwrap();
+        terminal
+            .draw(|frame| {
+                dialog.render(
+                    frame,
+                    frame.area(),
+                    crate::theme::Theme::load_builtin_default().get_colors(true),
+                )
+            })
+            .unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn click_text(buffer: &ratatui::buffer::Buffer, text: &str) -> MouseEvent {
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                if x as usize + text.width() > buffer.area.width as usize {
+                    continue;
+                }
+                let row = (x..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>();
+                if row.starts_with(text) {
+                    return MouseEvent {
+                        kind: MouseEventKind::Down(MouseButton::Left),
+                        column: x,
+                        row: y,
+                        modifiers: KeyModifiers::NONE,
+                    };
+                }
+            }
+        }
+        panic!("missing rendered hint {text:?}");
+    }
+
+    #[test]
+    fn rendered_header_escape_is_clickable_and_hidden_dialog_ignores_it() {
+        let mut dialog = Dialog::new("Picker");
+        dialog.show();
+        let buffer = render_clickable_dialog(&mut dialog, 80);
+        let click = click_text(&buffer, "esc");
+        for column in click.column..click.column + 3 {
+            assert_eq!(
+                dialog.mouse_key_event(MouseEvent { column, ..click }),
+                Some(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            );
+        }
+        assert_eq!(
+            dialog.mouse_key_event(MouseEvent {
+                column: click.column - 1,
+                ..click
+            }),
+            None
+        );
+        assert!(dialog.handle_mouse_event(click));
+        assert!(!dialog.is_visible());
+        assert_eq!(dialog.mouse_key_event(click), None);
+    }
+
+    #[test]
+    fn rendered_footer_shortcuts_follow_wrapping_and_ignore_gaps() {
+        let mut dialog = Dialog::new("Picker").with_actions(vec![
+            DialogAction {
+                label: "Choose".into(),
+                key: "enter".into(),
+            },
+            DialogAction {
+                label: "Favorite".into(),
+                key: "ctrl+f".into(),
+            },
+            DialogAction {
+                label: "Close".into(),
+                key: "esc".into(),
+            },
+        ]);
+        dialog.show();
+        let buffer = render_clickable_dialog(&mut dialog, 35);
+        let choose = click_text(&buffer, "Choose");
+        let favorite = click_text(&buffer, "Favorite");
+        assert!(favorite.row > choose.row);
+        for (label, hint, code, modifiers) in [
+            ("Choose", "enter", KeyCode::Enter, KeyModifiers::NONE),
+            (
+                "Favorite",
+                "ctrl+f",
+                KeyCode::Char('f'),
+                KeyModifiers::CONTROL,
+            ),
+            ("Close", "esc", KeyCode::Esc, KeyModifiers::NONE),
+        ] {
+            let label_click = click_text(&buffer, label);
+            let hint_click = MouseEvent {
+                column: label_click.column + label.width() as u16 + 2,
+                ..label_click
+            };
+            assert_eq!(
+                dialog.mouse_key_event(label_click),
+                Some(KeyEvent::new(code, modifiers))
+            );
+            assert_eq!(
+                dialog.mouse_key_event(hint_click),
+                Some(KeyEvent::new(code, modifiers))
+            );
+            for kind in [
+                MouseEventKind::Moved,
+                MouseEventKind::Up(MouseButton::Left),
+                MouseEventKind::Down(MouseButton::Right),
+            ] {
+                assert_eq!(
+                    dialog.mouse_key_event(MouseEvent {
+                        kind,
+                        ..label_click
+                    }),
+                    None
+                );
+            }
+            assert_eq!(
+                dialog.mouse_key_event(MouseEvent {
+                    column: hint_click.column + hint.width() as u16,
+                    ..label_click
+                }),
+                None
+            );
+        }
+        dialog.is_dragging_scrollbar = true;
+        assert_eq!(dialog.mouse_key_event(choose), None);
+    }
+
+    #[test]
+    fn clipped_footer_does_not_expose_unrendered_actions_or_stale_targets() {
+        let mut dialog = Dialog::new("Picker").with_actions(vec![
+            DialogAction {
+                label: "Long choice".into(),
+                key: "enter".into(),
+            },
+            DialogAction {
+                label: "Close".into(),
+                key: "esc".into(),
+            },
+        ]);
+        dialog.show();
+        let buffer = render_clickable_dialog(&mut dialog, 80);
+        let old_close = click_text(&buffer, "Close");
+        let buffer = render_clickable_dialog(&mut dialog, 15);
+        assert_eq!(dialog.mouse_key_event(old_close), None);
+        let clipped = click_text(&buffer, "Long");
+        assert_eq!(
+            dialog.mouse_key_event(clipped),
+            Some(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        );
+        assert_eq!(
+            dialog.mouse_key_event(MouseEvent {
+                column: dialog.content_area.right(),
+                ..clipped
+            }),
+            None
+        );
+        dialog.actions.clear();
+        render_clickable_dialog(&mut dialog, 15);
+        assert_eq!(dialog.mouse_key_event(clipped), None);
+    }
 
     fn create_test_items() -> Vec<DialogItem> {
         vec![

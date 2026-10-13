@@ -1,96 +1,128 @@
+use crate::theme::ThemeColors;
+use crate::ui::wrapping::wrap_styled_line;
 use pulldown_cmark::{Alignment, Event, Options, Parser, Tag, TagEnd};
-use std::borrow::Cow;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use ratatui::{
+    style::{Modifier, Style},
+    text::{Line, Span},
+};
+use std::ops::Range;
+use unicode_width::UnicodeWidthStr;
 
-/// Pre-process markdown content to extract and render tables,
-/// replacing table markdown with Unicode box-drawing rendered tables.
-pub fn preprocess_tables(content: &str, max_width: usize) -> Cow<'_, str> {
+/// A rendered table and the source range it replaces. Keeping styled lines out
+/// of the markdown parser preserves literal code and cell padding verbatim.
+pub(super) struct RenderedTable {
+    pub source: Range<usize>,
+    pub lines: Vec<Line<'static>>,
+}
+
+pub(super) fn render_tables(
+    content: &str,
+    max_width: usize,
+    colors: &ThemeColors,
+) -> Vec<RenderedTable> {
     if !contains_markdown_table(content) {
-        return Cow::Borrowed(content);
+        return Vec::new();
     }
 
-    let parser = Parser::new_ext(content, Options::ENABLE_TABLES).into_offset_iter();
-
-    let mut result = String::with_capacity(content.len());
-    let mut last_end = 0;
-
-    let mut in_table = false;
-    let mut table_alignments: Vec<Alignment> = Vec::new();
-    let mut rows: Vec<Vec<String>> = Vec::new();
-    let mut current_row: Vec<String> = Vec::new();
-    let mut current_cell = String::new();
+    let options = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH;
+    let parser = Parser::new_ext(content, options).into_offset_iter();
+    let mut tables = Vec::new();
+    let mut table_start = None;
+    let mut alignments = Vec::new();
+    let mut rows = Vec::new();
+    let mut row = Vec::new();
+    let mut cell = Line::default();
+    let mut inline_styles = vec![Style::default()];
 
     for (event, range) in parser {
         match event {
-            Event::Start(Tag::Table(alignments)) => {
-                // Flush text before the table
-                result.push_str(&content[last_end..range.start]);
-                in_table = true;
-                table_alignments = alignments;
+            Event::Start(Tag::Table(table_alignments)) => {
+                table_start = Some(range.start);
+                alignments = table_alignments;
                 rows.clear();
-                current_row.clear();
-                current_cell.clear();
+                row.clear();
             }
             Event::End(TagEnd::Table) => {
-                in_table = false;
-                last_end = range.end;
-                let rendered = render_table(&rows, &table_alignments, max_width);
-                if !result.is_empty() && !result.ends_with("\n\n") {
-                    if !result.ends_with('\n') {
-                        result.push('\n');
-                    }
-                    result.push('\n');
-                }
-                result.push_str(&preserve_table_line_breaks(&rendered));
-                rows.clear();
-            }
-            Event::Start(Tag::TableHead) => {
-                // Reset for header row
-                current_row.clear();
-                current_cell.clear();
-            }
-            Event::End(TagEnd::TableHead) => {
-                if !current_row.is_empty() {
-                    rows.push(std::mem::take(&mut current_row));
+                if let Some(start) = table_start.take() {
+                    tables.push(RenderedTable {
+                        source: start..range.end,
+                        lines: render_table(&rows, &alignments, max_width, colors),
+                    });
                 }
             }
-            Event::Start(Tag::TableRow) => {
-                current_row.clear();
-                current_cell.clear();
+            Event::Start(Tag::TableHead | Tag::TableRow) => row.clear(),
+            Event::End(TagEnd::TableHead | TagEnd::TableRow) => {
+                rows.push(std::mem::take(&mut row));
             }
-            Event::End(TagEnd::TableRow) => {
-                if !current_row.is_empty() {
-                    rows.push(std::mem::take(&mut current_row));
-                }
-                current_row = Vec::new();
+            Event::Start(Tag::TableCell) => {
+                cell = Line::default();
+                inline_styles.truncate(1);
             }
-            Event::Start(Tag::TableCell) => {}
             Event::End(TagEnd::TableCell) => {
-                // Flush cell content — even if empty (preserves column alignment)
-                current_row.push(std::mem::take(&mut current_cell));
+                row.push(std::mem::take(&mut cell));
             }
-            Event::Text(text) if in_table => {
-                // Flatten inline formatting — just collect the text
-                current_cell.push_str(&text);
+            Event::Start(
+                tag @ (Tag::Strong | Tag::Emphasis | Tag::Strikethrough | Tag::Link { .. }),
+            ) if table_start.is_some() => {
+                let current = *inline_styles.last().unwrap();
+                let style = match tag {
+                    Tag::Strong => current.add_modifier(Modifier::BOLD),
+                    Tag::Emphasis => current.add_modifier(Modifier::ITALIC),
+                    Tag::Strikethrough => current.add_modifier(Modifier::CROSSED_OUT),
+                    _ => current
+                        .fg(colors.markdown_link)
+                        .add_modifier(Modifier::UNDERLINED),
+                };
+                inline_styles.push(style);
             }
-            Event::Code(code) if in_table => {
-                // Don't wrap with backticks — tui-markdown will render inline code
-                // styling itself, and including backticks breaks width calculations
-                current_cell.push_str(&code);
+            Event::End(
+                TagEnd::Strong | TagEnd::Emphasis | TagEnd::Strikethrough | TagEnd::Link,
+            ) if table_start.is_some() => {
+                inline_styles.pop();
             }
-            Event::SoftBreak if in_table => {
-                current_cell.push(' ');
+            Event::Text(text) if table_start.is_some() => {
+                let style = cell_text_style(*inline_styles.last().unwrap(), colors);
+                cell.spans.push(Span::styled(text.into_string(), style));
             }
-            Event::HardBreak if in_table => {
-                current_cell.push('\n');
+            Event::Code(code) if table_start.is_some() => {
+                let style = inline_styles
+                    .last()
+                    .copied()
+                    .unwrap_or_default()
+                    .fg(colors.markdown_code)
+                    .bg(colors.background_element);
+                cell.spans.push(Span::styled(code.into_string(), style));
+            }
+            Event::SoftBreak if table_start.is_some() => {
+                cell.spans.push(Span::styled(
+                    " ",
+                    cell_text_style(*inline_styles.last().unwrap(), colors),
+                ));
+            }
+            Event::HardBreak if table_start.is_some() => {
+                cell.spans.push(Span::styled(
+                    "\n",
+                    cell_text_style(*inline_styles.last().unwrap(), colors),
+                ));
             }
             _ => {}
         }
     }
+    tables
+}
 
-    // Flush remaining content after last table
-    result.push_str(&content[last_end..]);
-    Cow::Owned(result)
+fn cell_text_style(style: Style, colors: &ThemeColors) -> Style {
+    if style.fg.is_some() {
+        return style;
+    }
+    let fg = if style.add_modifier.contains(Modifier::BOLD) {
+        colors.markdown_strong
+    } else if style.add_modifier.contains(Modifier::ITALIC) {
+        colors.markdown_emph
+    } else {
+        colors.markdown_text
+    };
+    style.fg(fg)
 }
 
 pub(crate) fn contains_markdown_table(content: &str) -> bool {
@@ -119,229 +151,119 @@ pub(crate) fn contains_markdown_table(content: &str) -> bool {
     })
 }
 
-fn wrap_cell(text: &str, width: usize) -> Vec<String> {
+fn wrap_cell(cell: &Line<'_>, width: usize) -> Vec<Line<'static>> {
     if width == 0 {
-        return vec![String::new()];
+        return vec![Line::default()];
     }
-
-    let mut lines = Vec::new();
-    for source_line in text.lines() {
-        wrap_cell_line(source_line.trim(), width, &mut lines);
-    }
-
-    if lines.is_empty() {
-        lines.push(String::new());
-    }
-
-    lines
+    wrap_styled_line(cell, width)
 }
 
-fn wrap_cell_line(line: &str, width: usize, output: &mut Vec<String>) {
-    if line.is_empty() {
-        output.push(String::new());
-        return;
-    }
-
-    let mut current = String::new();
-    let mut current_width = 0usize;
-
-    for word in line.split_whitespace() {
-        let word_width = UnicodeWidthStr::width(word);
-        let separator_width = usize::from(!current.is_empty());
-
-        if !current.is_empty() && current_width + separator_width + word_width <= width {
-            current.push(' ');
-            current.push_str(word);
-            current_width += separator_width + word_width;
-            continue;
-        }
-
-        if !current.is_empty() {
-            output.push(std::mem::take(&mut current));
-            current_width = 0;
-        }
-
-        if word_width <= width {
-            current.push_str(word);
-            current_width = word_width;
-        } else {
-            split_long_word(word, width, output, &mut current, &mut current_width);
-        }
-    }
-
-    if !current.is_empty() {
-        output.push(current);
-    }
-}
-
-fn split_long_word(
-    word: &str,
-    width: usize,
-    output: &mut Vec<String>,
-    current: &mut String,
-    current_width: &mut usize,
-) {
-    for ch in word.chars() {
-        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
-        if *current_width > 0 && *current_width + ch_width > width {
-            output.push(std::mem::take(current));
-            *current_width = 0;
-        }
-
-        current.push(ch);
-        *current_width += ch_width;
-
-        if *current_width == width {
-            output.push(std::mem::take(current));
-            *current_width = 0;
-        }
-    }
-}
-
-fn format_cell_line(text: &str, width: usize, align: &Alignment) -> String {
-    let display_width = UnicodeWidthStr::width(text);
-    let padding = width.saturating_sub(display_width);
-
-    match align {
-        Alignment::Right => format!("{}{}", " ".repeat(padding), text),
-        Alignment::Center => {
-            let left_pad = padding / 2;
-            let right_pad = padding - left_pad;
-            format!("{}{}{}", " ".repeat(left_pad), text, " ".repeat(right_pad))
-        }
-        _ => format!("{}{}", text, " ".repeat(padding)),
-    }
-}
-
-fn preserve_table_line_breaks(rendered: &str) -> String {
-    let mut result = String::with_capacity(rendered.len());
-    let mut lines = rendered.split('\n').peekable();
-
-    while let Some(line) = lines.next() {
-        result.push_str(line);
-        if lines.peek().is_some() {
-            result.push_str("  \n");
-        }
-    }
-
-    result
-}
-
-fn render_table(rows: &[Vec<String>], alignments: &[Alignment], max_width: usize) -> String {
-    if rows.is_empty() {
-        return String::new();
-    }
-
-    let num_cols = rows.iter().map(|r| r.len()).max().unwrap_or(0);
+fn render_table(
+    rows: &[Vec<Line<'static>>],
+    alignments: &[Alignment],
+    max_width: usize,
+    colors: &ThemeColors,
+) -> Vec<Line<'static>> {
+    let num_cols = rows.iter().map(Vec::len).max().unwrap_or(0);
     if num_cols == 0 {
-        return String::new();
+        return Vec::new();
     }
 
-    // Calculate natural column widths
-    let mut col_widths: Vec<usize> = vec![0; num_cols];
-    for row in rows {
-        for (i, cell) in row.iter().enumerate() {
-            if i < num_cols {
-                let width = cell.lines().map(UnicodeWidthStr::width).max().unwrap_or(0);
-                col_widths[i] = col_widths[i].max(width);
-            }
+    // Measure visible text, not markdown delimiters or style boundaries.
+    let plain_rows: Vec<Vec<String>> = rows
+        .iter()
+        .map(|row| {
+            row.iter()
+                .map(|cell| {
+                    cell.spans
+                        .iter()
+                        .flat_map(|span| span.content.chars())
+                        .map(|ch| {
+                            if ch.is_control() && !matches!(ch, '\n' | '\r') {
+                                '�'
+                            } else {
+                                ch
+                            }
+                        })
+                        .collect()
+                })
+                .collect()
+        })
+        .collect();
+    let mut natural = vec![0; num_cols];
+    for row in &plain_rows {
+        for (index, cell) in row.iter().enumerate() {
+            natural[index] =
+                natural[index].max(cell.lines().map(UnicodeWidthStr::width).max().unwrap_or(0));
         }
     }
+    let available = max_width.saturating_sub(3 * num_cols + 1);
+    let minimum = minimum_column_widths(&plain_rows, num_cols);
+    let widths = allocate_column_widths(&natural, &minimum, available);
+    let base_style = Style::default().fg(colors.markdown_text);
+    let border = |left, join, right| {
+        let segments = widths
+            .iter()
+            .map(|width| "─".repeat(width + 2))
+            .collect::<Vec<_>>();
+        Line::styled(format!("{left}{}{right}", segments.join(join)), base_style)
+    };
+    let mut result = vec![border('┌', "┬", '┐')];
 
-    // Constrain total width to max_width
-    // Each column separator uses 1 char ('│') and 1 space padding on each side
-    // So per column: 1 (left pad) + width + 1 (right pad), plus 1 for the left border
-    let padding_per_col = 2; // one space left, one space right
-    let border_chars = num_cols + 1; // left border + separators between cols + right border
-    let available_for_content = max_width.saturating_sub(border_chars + num_cols * padding_per_col);
-
-    let min_col_widths = minimum_column_widths(rows, num_cols);
-    col_widths = allocate_column_widths(&col_widths, &min_col_widths, available_for_content);
-
-    let mut result = String::new();
-
-    // Top border
-    result.push('┌');
-    for (i, w) in col_widths.iter().enumerate() {
-        if i > 0 {
-            result.push('┬');
-        }
-        result.push_str(&"─".repeat(w + padding_per_col));
-    }
-    result.push_str("┐\n");
-
-    // Rows
-    for (row_idx, row) in rows.iter().enumerate() {
-        let wrapped_cells: Vec<Vec<String>> = col_widths
+    for (row_index, row) in rows.iter().enumerate() {
+        let wrapped: Vec<_> = widths
             .iter()
             .enumerate()
-            .map(|(col_idx, width)| {
-                let cell_text = row.get(col_idx).map(|s| s.as_str()).unwrap_or("");
-                wrap_cell(cell_text, *width)
+            .map(|(index, &width)| {
+                row.get(index)
+                    .map(|cell| wrap_cell(cell, width))
+                    .unwrap_or_else(|| vec![Line::default()])
             })
             .collect();
-        let row_height = wrapped_cells.iter().map(Vec::len).max().unwrap_or(1).max(1);
-
-        // Row content. Cells that are shorter than the tallest cell in the row
-        // are padded with empty visual lines so borders remain aligned.
-        for line_idx in 0..row_height {
-            result.push('│');
-            for (col_idx, width) in col_widths.iter().enumerate() {
-                if col_idx > 0 {
-                    result.push('│');
+        let height = wrapped.iter().map(Vec::len).max().unwrap_or(1);
+        for line_index in 0..height {
+            let mut spans = vec![Span::styled("│", base_style)];
+            for (column, &width) in widths.iter().enumerate() {
+                let cell_line = wrapped[column].get(line_index);
+                let padding = width.saturating_sub(cell_line.map_or(0, Line::width));
+                let (left, right) = match alignments.get(column) {
+                    Some(Alignment::Right) => (padding, 0),
+                    Some(Alignment::Center) => (padding / 2, padding - padding / 2),
+                    _ => (0, padding),
+                };
+                // Padding and borders use the base style, never a cell's code
+                // background or emphasis modifiers.
+                spans.push(Span::styled(" ".repeat(left + 1), base_style));
+                if let Some(cell_line) = cell_line {
+                    spans.extend(cell_line.spans.iter().cloned());
                 }
-                let align = alignments.get(col_idx).unwrap_or(&Alignment::None);
-                let cell_line = wrapped_cells[col_idx]
-                    .get(line_idx)
-                    .map(String::as_str)
-                    .unwrap_or("");
-                result.push(' ');
-                result.push_str(&format_cell_line(cell_line, *width, align));
-                result.push(' ');
+                spans.push(Span::styled(
+                    format!("{}│", " ".repeat(right + 1)),
+                    base_style,
+                ));
             }
-            result.push_str("│\n");
+            result.push(Line::from(spans));
         }
-
-        // Separator after header
-        if row_idx == 0 && rows.len() > 1 {
-            result.push('├');
-            for (i, w) in col_widths.iter().enumerate() {
-                if i > 0 {
-                    result.push('┼');
-                }
-                result.push_str(&"─".repeat(w + padding_per_col));
-            }
-            result.push_str("┤\n");
+        if row_index == 0 && rows.len() > 1 {
+            result.push(border('├', "┼", '┤'));
         }
     }
-
-    // Bottom border
-    result.push('└');
-    for (i, w) in col_widths.iter().enumerate() {
-        if i > 0 {
-            result.push('┴');
-        }
-        result.push_str(&"─".repeat(w + padding_per_col));
-    }
-    result.push('┘');
-
+    result.push(border('└', "┴", '┘'));
     result
 }
 
 fn minimum_column_widths(rows: &[Vec<String>], num_cols: usize) -> Vec<usize> {
     let mut widths = vec![1; num_cols];
-
-    if let Some(header) = rows.first() {
-        for (col_idx, cell) in header.iter().enumerate().take(num_cols) {
-            let header_word_width = cell
+    for row in rows {
+        for (index, cell) in row.iter().enumerate().take(num_cols) {
+            let word_width = cell
                 .split_whitespace()
                 .map(UnicodeWidthStr::width)
                 .max()
                 .unwrap_or(1);
-            widths[col_idx] = widths[col_idx].max(header_word_width);
+            widths[index] = widths[index].max(word_width);
         }
     }
-
     widths
 }
 
@@ -360,7 +282,9 @@ fn allocate_column_widths(natural: &[usize], minimum: &[usize], available: usize
     }
 
     let column_count = natural.len();
-    let min_widths: Vec<usize> = natural
+    // A pathological unbroken word (URL/hash) may exceed the viewport.
+    // Cap its minimum at an equal share only when the word minimums cannot fit.
+    let mut min_widths: Vec<usize> = natural
         .iter()
         .enumerate()
         .map(|(index, &width)| {
@@ -371,24 +295,27 @@ fn allocate_column_widths(natural: &[usize], minimum: &[usize], available: usize
                 .clamp(1, width.max(1))
         })
         .collect();
+    if min_widths.iter().sum::<usize>() > available {
+        let fair_share = (available / column_count).max(1);
+        for width in &mut min_widths {
+            *width = (*width).min(fair_share);
+        }
+    }
     let min_total: usize = min_widths.iter().sum();
-
-    if available <= min_total {
+    if available < min_total {
         return allocate_tiny_widths(natural, available);
     }
 
-    // Start with readable minimums, then add remaining cells one-by-one to the
-    // column that is currently most compressed relative to its natural width.
-    // This keeps long text columns balanced instead of starving whichever wide
-    // column happens to be sorted first.
+    // Square-root weighting gives compact labels/IDs enough room before long
+    // prose claims the remainder. Compare squared ratios to avoid floats.
     let mut widths = min_widths;
     let mut remaining = available - min_total;
     while remaining > 0 {
         let Some(index) = (0..column_count)
             .filter(|&index| widths[index] < natural[index])
             .max_by(|&left, &right| {
-                let left_score = natural[left] * widths[right];
-                let right_score = natural[right] * widths[left];
+                let left_score = natural[left] as u128 * (widths[right] as u128).pow(2);
+                let right_score = natural[right] as u128 * (widths[left] as u128).pow(2);
                 left_score
                     .cmp(&right_score)
                     .then_with(|| natural[left].cmp(&natural[right]))
@@ -451,6 +378,127 @@ fn allocate_tiny_widths(natural: &[usize], available: usize) -> Vec<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_colors() -> ThemeColors {
+        crate::theme::Theme::load_builtin_default().get_colors(true)
+    }
+
+    fn plain_lines(lines: &[Line<'_>]) -> String {
+        lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn preprocess_tables(content: &str, width: usize) -> String {
+        let mut result = String::new();
+        let mut end = 0;
+        for table in render_tables(content, width, &test_colors()) {
+            result.push_str(&content[end..table.source.start]);
+            result.push_str(&plain_lines(&table.lines));
+            end = table.source.end;
+        }
+        result.push_str(&content[end..]);
+        result
+    }
+
+    const TICKET_TABLE: &str = "| Order | Ticket / current status | Problem and next action |\n\
+        | --- | --- | --- |\n\
+        | 1 | WEB-1281 – In Progress | Reconnect fails with 404 Stream not found, leaving generation stuck. Latest comment: patch didn't work. Next: reproduce an approved in-flight reload in a fresh conversation, then trace stream IDs, lifecycle and resume handling. |\n\
+        | 2 | WEB-1286 – In Progress | Large search/aggregate outputs overwhelm model context. Aggregations lack a size bound. Next: establish a repeatable large-payload case, then implement and verify predictable per-call budgets. |\n\
+        | 3 | WEB-1287 – In Progress | Compaction drops earlier search evidence. Next: create a long-thread regression with known evidence, then retain useful structured summaries rather than opaque stubs. |\n\
+        | 4 | WEB-1282 – Later | Too many sequential lookups make answers slow. Next: inspect the reported slow chat, confirm where the time went, and identify independent searches that can run in parallel. |\n\
+        | 5 | WEB-1115 – Later | Chat suggestions exceed their model's context limit. Separate from the main answer pipeline. Next: reproduce an oversized suggestion request and bound its input to the actual model limit. |\n";
+
+    #[test]
+    fn ticket_status_words_remain_intact_beside_long_descriptions() {
+        let expected = "Ticket / current status WEB-1281 – In Progress WEB-1286 – In Progress WEB-1287 – In Progress WEB-1282 – Later WEB-1115 – Later";
+
+        for width in [60, 80, 100, 120] {
+            let result = preprocess_tables(TICKET_TABLE, width);
+            let status_words = result
+                .lines()
+                .filter(|line| line.starts_with('│'))
+                .flat_map(|line| line.split('│').nth(2).unwrap().split_whitespace())
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert_eq!(status_words, expected, "width {width}:\n{result}");
+            for line in result.lines() {
+                assert_eq!(UnicodeWidthStr::width(line.trim_end()), width);
+            }
+        }
+    }
+
+    #[test]
+    fn compact_columns_get_room_before_prose_takes_the_remaining_width() {
+        let widths = allocate_column_widths(&[5, 23, 240], &[5, 8, 11], 110);
+        assert_eq!(widths, [5, 23, 82]);
+    }
+
+    #[test]
+    fn minimum_widths_consider_words_in_body_cells() {
+        let rows = vec![
+            vec!["ID".into(), "Status".into()],
+            vec!["WEB-1281".into(), "In Progress".into()],
+        ];
+        assert_eq!(minimum_column_widths(&rows, 2), [8, 8]);
+    }
+
+    #[test]
+    fn oversized_words_do_not_steal_other_columns_minimum_widths() {
+        let widths = allocate_column_widths(&[20, 1000], &[20, 1000], 40);
+        assert_eq!(widths, [20, 20]);
+    }
+
+    #[test]
+    fn equal_prose_columns_receive_balanced_widths() {
+        let widths = allocate_column_widths(&[200, 200, 200], &[8, 8, 8], 80);
+        assert_eq!(widths.iter().sum::<usize>(), 80);
+        assert!(widths.iter().max().unwrap() - widths.iter().min().unwrap() <= 1);
+    }
+
+    #[test]
+    fn wrapping_prefers_spaces_and_splits_only_oversized_words() {
+        assert_eq!(
+            plain_lines(&wrap_cell(&Line::from("WEB-1281 – In Progress"), 11)),
+            "WEB-1281 –\nIn Progress"
+        );
+        assert_eq!(
+            plain_lines(&wrap_cell(&Line::from("abcdefghijk next"), 5)),
+            "abcde\nfghij\nk\nnext"
+        );
+        assert_eq!(
+            plain_lines(&wrap_cell(&Line::from(Span::raw("first\n\nsecond")), 10)),
+            "first\n\nsecond"
+        );
+    }
+
+    #[test]
+    fn unicode_words_use_display_width_for_column_minimums() {
+        let rows = vec![
+            vec!["ID".into(), "Notes".into()],
+            vec![
+                "東京大阪".into(),
+                "A long description that needs to wrap over several lines.".into(),
+            ],
+        ];
+        assert_eq!(minimum_column_widths(&rows, 2), [8, 11]);
+        let styled_rows = rows
+            .iter()
+            .map(|row| row.iter().cloned().map(Line::from).collect())
+            .collect::<Vec<_>>();
+        let result = plain_lines(&render_table(&styled_rows, &[], 40, &test_colors()));
+        assert!(result.contains("東京大阪"), "{result}");
+        for line in result.lines() {
+            assert_eq!(UnicodeWidthStr::width(line), 40, "{result}");
+        }
+    }
 
     #[test]
     fn test_simple_table() {
@@ -557,7 +605,7 @@ mod tests {
     fn test_table_cell_with_code() {
         let input = "| Tool | Desc |\n| --- | --- |\n| `read` | Read files |\n";
         let result = preprocess_tables(input, 80);
-        // Backticks are stripped — tui-markdown handles inline code styling
+        // The visible text excludes code delimiters; styles are carried by spans.
         assert!(result.contains("read"));
         assert!(!result.contains("`read`"));
     }
@@ -579,6 +627,65 @@ mod tests {
         let top_border_count = result.matches("┌").count();
         assert_eq!(top_border_count, 2);
         assert!(result.contains("Middle text"));
+    }
+
+    #[test]
+    fn table_source_ranges_leave_surrounding_markdown_untouched() {
+        let content = "**Before**\n\n| A |\n| --- |\n| *one* |\n\nMiddle\n\n| B |\n| --- |\n| `two` |\n\n*After*";
+        let tables = render_tables(content, 40, &test_colors());
+        assert_eq!(tables.len(), 2);
+        assert_eq!(&content[..tables[0].source.start], "**Before**\n\n");
+        assert_eq!(
+            &content[tables[0].source.end..tables[1].source.start],
+            "\nMiddle\n\n"
+        );
+        assert_eq!(&content[tables[1].source.end..], "\n*After*");
+    }
+
+    #[test]
+    fn fenced_tables_are_left_as_code() {
+        let content = "```md\n| A | B |\n| --- | --- |\n| **bold** | `code` |\n```";
+        assert!(render_tables(content, 40, &test_colors()).is_empty());
+    }
+
+    #[test]
+    fn alignment_uses_visible_width_of_styled_cells() {
+        let input = "| Left | Center | Right |\n| :--- | :---: | ---: |\n| **x** | *y* | `z` |\n";
+        let tables = render_tables(input, 30, &test_colors());
+        let output = plain_lines(&tables[0].lines);
+        let body = output.lines().find(|line| line.contains('x')).unwrap();
+        let cells = body.split('│').skip(1).take(3).collect::<Vec<_>>();
+        assert!(cells[0].starts_with(" x"), "{body}");
+        assert!(cells[2].ends_with("z "), "{body}");
+        let left = cells[1].len() - cells[1].trim_start().len();
+        let right = cells[1].len() - cells[1].trim_end().len();
+        assert!(left.abs_diff(right) <= 1, "{body}");
+        for line in &tables[0].lines {
+            assert_eq!(line.width(), 30, "{output}");
+        }
+    }
+
+    #[test]
+    fn allocations_use_the_budget_and_preserve_feasible_word_minimums() {
+        for natural in [[0, 0, 0], [5, 23, 240], [3, 7, 1000], [200, 200, 200]] {
+            let minimum = natural.map(|width| width.clamp(1, 8));
+            for available in 0..150 {
+                let widths = allocate_column_widths(&natural, &minimum, available);
+                assert_eq!(widths.len(), natural.len());
+                assert_eq!(
+                    widths.iter().sum::<usize>(),
+                    available,
+                    "{natural:?} at {available}"
+                );
+                if natural.iter().sum::<usize>() > available
+                    && minimum.iter().sum::<usize>() <= available
+                {
+                    for (width, minimum) in widths.iter().zip(minimum) {
+                        assert!(*width >= minimum);
+                    }
+                }
+            }
+        }
     }
 
     #[test]

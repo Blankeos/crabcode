@@ -38,6 +38,7 @@ pub struct ActionDialog {
     visible: bool,
     dialog_area: Rect,
     content_area: Rect,
+    shortcut_hitboxes: Vec<(Rect, KeyCode)>,
     scroll_offset: usize,
     visible_row_count: usize,
     is_dragging_scrollbar: bool,
@@ -53,6 +54,7 @@ impl ActionDialog {
             visible: false,
             dialog_area: Rect::default(),
             content_area: Rect::default(),
+            shortcut_hitboxes: Vec::new(),
             scroll_offset: 0,
             visible_row_count: 0,
             is_dragging_scrollbar: false,
@@ -68,6 +70,7 @@ impl ActionDialog {
 
     pub fn hide(&mut self) {
         self.visible = false;
+        self.shortcut_hitboxes.clear();
         self.is_dragging_scrollbar = false;
         self.scrollbar_drag_offset = None;
     }
@@ -186,6 +189,16 @@ impl ActionDialog {
             return ActionDialogEvent::None;
         }
 
+        if matches!(event.kind, MouseEventKind::Down(MouseButton::Left)) {
+            if let Some((_, code)) = self
+                .shortcut_hitboxes
+                .iter()
+                .find(|(area, _)| area.contains(point))
+            {
+                return self.handle_key_event(KeyEvent::new(*code, KeyModifiers::NONE));
+            }
+        }
+
         let is_on_scrollbar = scrollbar_area.contains(point);
         match event.kind {
             MouseEventKind::Down(MouseButton::Left) => {
@@ -270,6 +283,8 @@ impl ActionDialog {
             return;
         }
 
+        self.shortcut_hitboxes.clear();
+
         const DIALOG_WIDTH: u16 = 70;
         const MIN_DIALOG_HEIGHT: u16 = 7;
         const HEADER_HEIGHT: u16 = 1;
@@ -324,7 +339,7 @@ impl ActionDialog {
         self.render_footer(frame, chunks[4], colors);
     }
 
-    fn render_header(&self, frame: &mut Frame, area: Rect, colors: ThemeColors) {
+    fn render_header(&mut self, frame: &mut Frame, area: Rect, colors: ThemeColors) {
         let esc_text = "esc";
         let esc_area_width = (esc_text.width() as u16).saturating_add(1);
         let header_chunks = Layout::default()
@@ -351,6 +366,18 @@ impl ActionDialog {
             )]))
             .alignment(Alignment::Right),
             header_chunks[1],
+        );
+
+        let esc_width = (esc_text.width() as u16).min(header_chunks[1].width);
+        self.register_shortcut_hitbox(
+            Rect::new(
+                header_chunks[1].right().saturating_sub(esc_width),
+                header_chunks[1].y,
+                esc_width,
+                header_chunks[1].height.min(1),
+            )
+            .intersection(frame.area()),
+            KeyCode::Esc,
         );
     }
 
@@ -401,19 +428,43 @@ impl ActionDialog {
         );
     }
 
-    fn render_footer(&self, frame: &mut Frame, area: Rect, colors: ThemeColors) {
-        let line = Line::from(vec![
-            Span::styled(
-                "enter",
-                Style::default()
-                    .fg(colors.primary)
-                    .add_modifier(Modifier::BOLD),
+    fn render_footer(&mut self, frame: &mut Frame, area: Rect, colors: ThemeColors) {
+        let primary = Style::default().fg(colors.primary);
+        let weak = Style::default().fg(colors.text_weak);
+        let hints = [
+            (
+                Span::styled("enter", primary.add_modifier(Modifier::BOLD)),
+                Some(KeyCode::Enter),
             ),
-            Span::styled(" select", Style::default().fg(colors.text_weak)),
-            Span::styled("  ↑/↓", Style::default().fg(colors.primary)),
-            Span::styled(" move", Style::default().fg(colors.text_weak)),
-        ]);
-        frame.render_widget(Paragraph::new(line), area);
+            (Span::styled(" select", weak), Some(KeyCode::Enter)),
+            (Span::styled("  ", primary), None),
+            (Span::styled("↑", primary), Some(KeyCode::Up)),
+            (Span::styled("/", primary), None),
+            (Span::styled("↓", primary), Some(KeyCode::Down)),
+            (Span::styled(" move", weak), None),
+        ];
+        let mut x = area.x;
+        let mut spans = Vec::with_capacity(hints.len());
+        for (span, code) in hints {
+            let width = span.width() as u16;
+            if let Some(code) = code {
+                self.register_shortcut_hitbox(
+                    Rect::new(x, area.y, width, area.height.min(1))
+                        .intersection(area)
+                        .intersection(frame.area()),
+                    code,
+                );
+            }
+            x = x.saturating_add(width);
+            spans.push(span);
+        }
+        frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    }
+
+    fn register_shortcut_hitbox(&mut self, area: Rect, code: KeyCode) {
+        if area.width > 0 && area.height > 0 {
+            self.shortcut_hitboxes.push((area, code));
+        }
     }
 
     fn item_spans_for_width(
@@ -585,6 +636,52 @@ impl ActionDialog {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::theme::Theme;
+    use ratatui::{backend::TestBackend, buffer::Buffer, Terminal};
+
+    fn render_dialog(dialog: &mut ActionDialog, width: u16, height: u16) -> Buffer {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| {
+                dialog.render(
+                    frame,
+                    frame.area(),
+                    Theme::load_builtin_default().get_colors(true),
+                );
+            })
+            .unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn rendered_text_position(buffer: &Buffer, text: &str) -> Position {
+        for y in buffer.area.y..buffer.area.bottom() {
+            for x in buffer.area.x..buffer.area.right() {
+                let mut column = x;
+                if text.chars().all(|ch| {
+                    let matches = column < buffer.area.right()
+                        && buffer[(column, y)].symbol() == ch.to_string();
+                    column += UnicodeWidthChar::width(ch).unwrap_or(0) as u16;
+                    matches
+                }) {
+                    return Position::new(x, y);
+                }
+            }
+        }
+        panic!("{text:?} not found in rendered dialog");
+    }
+
+    fn mouse(kind: MouseEventKind, point: Position) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column: point.x,
+            row: point.y,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    fn click(dialog: &mut ActionDialog, point: Position) -> ActionDialogEvent {
+        dialog.handle_mouse_event(mouse(MouseEventKind::Down(MouseButton::Left), point))
+    }
 
     fn items(count: usize) -> Vec<ActionDialogItem> {
         (0..count)
@@ -595,6 +692,194 @@ mod tests {
                 description: String::new(),
             })
             .collect()
+    }
+
+    #[test]
+    fn rendered_esc_hint_closes_dialog_and_hidden_dialog_ignores_clicks() {
+        let mut dialog = ActionDialog::with_items("Actions", items(3));
+        dialog.show();
+        let buffer = render_dialog(&mut dialog, 90, 24);
+        let esc = rendered_text_position(&buffer, "esc");
+
+        for x in esc.x..esc.x + 3 {
+            let point = Position::new(x, esc.y);
+            dialog.show();
+            render_dialog(&mut dialog, 90, 24);
+            assert_eq!(click(&mut dialog, point), ActionDialogEvent::Close);
+            assert!(!dialog.is_visible());
+            assert_eq!(click(&mut dialog, point), ActionDialogEvent::None);
+        }
+        for text in ["enter select", "↑", "↓"] {
+            let point = rendered_text_position(&buffer, text);
+            assert_eq!(click(&mut dialog, point), ActionDialogEvent::None);
+        }
+        assert_eq!(dialog.selected_index(), 0);
+    }
+
+    #[test]
+    fn rendered_enter_select_hint_selects_only_on_left_press() {
+        let mut dialog = ActionDialog::with_items("Actions", items(3));
+        dialog.show();
+        assert!(dialog.select_item_by_id("1"));
+        let buffer = render_dialog(&mut dialog, 90, 24);
+        let enter = rendered_text_position(&buffer, "enter select");
+
+        for x in enter.x..enter.x + "enter select".width() as u16 {
+            let point = Position::new(x, enter.y);
+            for kind in [
+                MouseEventKind::Moved,
+                MouseEventKind::Drag(MouseButton::Left),
+                MouseEventKind::Down(MouseButton::Right),
+                MouseEventKind::Down(MouseButton::Middle),
+                MouseEventKind::Up(MouseButton::Left),
+            ] {
+                assert_eq!(
+                    dialog.handle_mouse_event(mouse(kind, point)),
+                    ActionDialogEvent::None
+                );
+            }
+            assert_eq!(click(&mut dialog, point), ActionDialogEvent::Select);
+            assert_eq!(
+                dialog.handle_mouse_event(mouse(MouseEventKind::Up(MouseButton::Left), point)),
+                ActionDialogEvent::None
+            );
+            assert!(dialog.is_visible());
+            assert_eq!(dialog.get_selected().unwrap().id, "1");
+        }
+    }
+
+    #[test]
+    fn rendered_arrow_hints_navigate_and_keep_selection_visible() {
+        let mut dialog = ActionDialog::with_items("Actions", items(40));
+        dialog.show();
+        let buffer = render_dialog(&mut dialog, 90, 12);
+        let up = rendered_text_position(&buffer, "↑");
+        let down = rendered_text_position(&buffer, "↓");
+        let mut keyboard_dialog = dialog.clone();
+
+        for (point, code) in [(up, KeyCode::Up), (down, KeyCode::Down), (up, KeyCode::Up)] {
+            for _ in 0..45 {
+                assert_eq!(
+                    click(&mut dialog, point),
+                    keyboard_dialog.handle_key_event(KeyEvent::new(code, KeyModifiers::NONE))
+                );
+                assert_eq!(dialog.selected_index(), keyboard_dialog.selected_index());
+                assert_eq!(dialog.scroll_offset, keyboard_dialog.scroll_offset);
+                assert_eq!(
+                    dialog.handle_mouse_event(mouse(MouseEventKind::Up(MouseButton::Left), point)),
+                    ActionDialogEvent::None
+                );
+                assert_eq!(dialog.selected_index(), keyboard_dialog.selected_index());
+                assert!(dialog.selected_index >= dialog.scroll_offset);
+                assert!(dialog.selected_index < dialog.scroll_offset + dialog.visible_row_count);
+            }
+        }
+    }
+
+    #[test]
+    fn unrelated_clicks_preserve_existing_dialog_mouse_behavior() {
+        let mut dialog = ActionDialog::with_items("Actions", items(3));
+        dialog.show();
+        let buffer = render_dialog(&mut dialog, 90, 24);
+        let esc = rendered_text_position(&buffer, "esc");
+        let enter = rendered_text_position(&buffer, "enter select");
+        let up = rendered_text_position(&buffer, "↑");
+        let down = rendered_text_position(&buffer, "↓");
+
+        for point in [
+            rendered_text_position(&buffer, "Actions"),
+            Position::new(esc.x - 1, esc.y),
+            Position::new(esc.x, esc.y - 1),
+            Position::new(enter.x, enter.y + 1),
+            Position::new(up.x - 1, up.y),
+            Position::new(up.x + 1, up.y),
+            Position::new(down.x + 1, down.y),
+            Position::new(dialog.dialog_area.x, dialog.dialog_area.y),
+        ] {
+            assert_eq!(click(&mut dialog, point), ActionDialogEvent::None);
+            assert!(dialog.is_visible());
+            assert_eq!(dialog.selected_index(), 0);
+        }
+
+        for point in [esc, up, down] {
+            for kind in [
+                MouseEventKind::Moved,
+                MouseEventKind::Down(MouseButton::Right),
+                MouseEventKind::Up(MouseButton::Left),
+                MouseEventKind::Drag(MouseButton::Left),
+            ] {
+                assert_eq!(
+                    dialog.handle_mouse_event(mouse(kind, point)),
+                    ActionDialogEvent::None
+                );
+                assert!(dialog.is_visible());
+                assert_eq!(dialog.selected_index(), 0);
+            }
+        }
+
+        let item = rendered_text_position(&buffer, "Action 1");
+        assert_eq!(click(&mut dialog, item), ActionDialogEvent::None);
+        assert_eq!(dialog.selected_index(), 1);
+        assert_eq!(
+            dialog.handle_mouse_event(mouse(MouseEventKind::Up(MouseButton::Left), item)),
+            ActionDialogEvent::Select
+        );
+        assert_eq!(
+            click(&mut dialog, Position::new(0, 0)),
+            ActionDialogEvent::Close
+        );
+        assert!(!dialog.is_visible());
+    }
+
+    #[test]
+    fn rendered_shortcut_hitboxes_follow_clipping_and_resize() {
+        let mut dialog = ActionDialog::with_items("Actions", items(3));
+        dialog.show();
+        let wide_buffer = render_dialog(&mut dialog, 90, 24);
+        let old_down = rendered_text_position(&wide_buffer, "↓");
+
+        // Resizing only the height leaves the old footer inside the dialog, but
+        // it must no longer respond as a shortcut.
+        let buffer = render_dialog(&mut dialog, 90, 20);
+        assert_eq!(buffer[(old_down.x, old_down.y)].symbol(), " ");
+        assert!(dialog.select_item_by_id("1"));
+        assert_eq!(click(&mut dialog, old_down), ActionDialogEvent::None);
+        assert_eq!(dialog.selected_index(), 1);
+        assert!(dialog.is_visible());
+
+        // Six columns of dialog padding leave only "enter select  ↑/" visible.
+        let buffer = render_dialog(&mut dialog, 22, 24);
+        let enter = rendered_text_position(&buffer, "enter select");
+        let up = rendered_text_position(&buffer, "↑");
+        assert_eq!(buffer[(up.x + 1, up.y)].symbol(), "/");
+        assert_eq!(buffer[(up.x + 2, up.y)].symbol(), " ");
+        assert!(dialog.select_item_by_id("1"));
+        assert_eq!(
+            click(&mut dialog, Position::new(up.x + 2, up.y)),
+            ActionDialogEvent::None
+        );
+        assert_eq!(dialog.selected_index(), 1);
+        assert_eq!(click(&mut dialog, up), ActionDialogEvent::None);
+        assert_eq!(dialog.selected_index(), 0);
+        assert_eq!(click(&mut dialog, enter), ActionDialogEvent::Select);
+
+        // Right-aligned text wider than the header is clipped to "e". Both
+        // the header and footer remain clickable even with one visible cell.
+        let buffer = render_dialog(&mut dialog, 7, 24);
+        let esc = rendered_text_position(&buffer, "e");
+        let enter = Position::new(esc.x, dialog.content_area.bottom() - 1);
+        assert_eq!(buffer[(enter.x, enter.y)].symbol(), "e");
+        assert_eq!(click(&mut dialog, enter), ActionDialogEvent::Select);
+        assert_eq!(click(&mut dialog, esc), ActionDialogEvent::Close);
+
+        dialog.show();
+        render_dialog(&mut dialog, 6, 3);
+        assert!(dialog.shortcut_hitboxes.is_empty());
+        assert_eq!(
+            click(&mut dialog, Position::new(3, 1)),
+            ActionDialogEvent::None
+        );
+        assert!(dialog.is_visible());
     }
 
     #[test]

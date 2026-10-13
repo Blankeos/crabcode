@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Fail if aisdk imports host product modules.
+# Fail if aisdk imports host product modules or writes directly to the terminal.
 # Host → aisdk is fine; aisdk → host is not.
 set -euo pipefail
 
@@ -31,6 +31,19 @@ if [[ -n "$policy_hits" ]]; then
   echo "aisdk naming smell: host policy names found under src/aisdk/" >&2
   echo "$policy_hits" >&2
   echo "Use capability/tool factories + HostedSearchSelection instead of host policy knobs." >&2
+  exit 1
+fi
+
+# SDK diagnostics must use the host-injected logger. Direct console output can
+# corrupt a host's terminal UI or machine-readable stdout/stderr streams.
+console_hits="$(
+  rg -n --glob '*.rs' '\b(print|println|eprint|eprintln|dbg)\s*!' "$AISDK" \
+    | rg -v '^[^:]+:[0-9]+:\s*(///|//!|//|\*)' || true
+)"
+if [[ -n "$console_hits" ]]; then
+  echo "aisdk boundary violation: direct console output found under src/aisdk/" >&2
+  echo "$console_hits" >&2
+  echo "Use crate::log::log(...) for host-injected diagnostics instead." >&2
   exit 1
 fi
 

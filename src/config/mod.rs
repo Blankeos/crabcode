@@ -2,9 +2,9 @@ pub mod configuration;
 pub mod runtime;
 
 pub use configuration::{
-    ConfigLoader, CustomProviderConfig, EditorConfig, ImageOpenCommandConfig, ImageOpenWith,
-    ImagesConfig, McpConfig, McpServerConfig, NotificationEventConfig, NotificationsConfig,
-    ProviderTimeout, TerminalNotificationCondition, TerminalNotificationMode,
+    ConfigLoader, CustomProviderConfig, EditorConfig, McpConfig, McpServerConfig,
+    NotificationEventConfig, NotificationsConfig, ProviderTimeout, TerminalNotificationCondition,
+    TerminalNotificationMode,
 };
 pub use runtime::{ConfigRuntime, ConfigRuntimeOptions};
 

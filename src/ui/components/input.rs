@@ -79,7 +79,7 @@ pub struct Input {
     draft_state: Option<DraftState>,
     local_images: Vec<LocalImageAttachment>,
     pending_pastes: Vec<PendingPaste>,
-    image_open_config: crate::config::ImagesConfig,
+    pending_file_action: Option<PathBuf>,
     hovered_image_placeholder: Option<String>,
     hovered_paste_placeholder: Option<String>,
 }
@@ -134,7 +134,7 @@ impl Input {
             draft_state: None,
             local_images: Vec::new(),
             pending_pastes: Vec::new(),
-            image_open_config: crate::config::ImagesConfig::default(),
+            pending_file_action: None,
             hovered_image_placeholder: None,
             hovered_paste_placeholder: None,
         }
@@ -248,6 +248,32 @@ impl Input {
         }
     }
 
+    /// Native collapse: with an active selection, plain Left/Right clears
+    /// the highlight and jumps the caret to the selection edge (Left ->
+    /// start, Right -> end) instead of moving one char from the cursor.
+    /// Returns false when there is no selection to collapse.
+    fn collapse_selection_to_edge(&mut self, to_start: bool) -> bool {
+        let Some(((start_row, start_col), (end_row, end_col))) = self.textarea.selection_range()
+        else {
+            return false;
+        };
+        if (start_row, start_col) == (end_row, end_col) {
+            return false;
+        }
+        self.reveal_cursor_after_key_input();
+        self.preferred_visual_col = None;
+        let (row, col) = if to_start {
+            (start_row, start_col)
+        } else {
+            (end_row, end_col)
+        };
+        self.textarea.cancel_selection();
+        self.clear_selection_drag_state();
+        self.textarea
+            .move_cursor(CursorMove::Jump(row as u16, col as u16));
+        true
+    }
+
     /// Option+Arrow word jump (mirrors tui-textarea's Ctrl+Arrow handling,
     /// which terminals don't send for macOS Option). With `extend`, behaves
     /// like Shift+Arrow: starts/continues the selection instead of clearing.
@@ -323,8 +349,8 @@ impl Input {
         self
     }
 
-    pub fn set_image_open_config(&mut self, config: crate::config::ImagesConfig) {
-        self.image_open_config = config;
+    pub fn take_file_action(&mut self) -> Option<PathBuf> {
+        self.pending_file_action.take()
     }
 
     pub fn contains_mouse(&self, mouse: MouseEvent) -> bool {
@@ -821,6 +847,18 @@ impl Input {
             }
             KeyCode::Tab => false,
             KeyCode::Esc => false,
+            // Native behavior: plain Left/Right with an active selection
+            // collapses to the selection edge (Left -> start, Right -> end).
+            // Must come before the generic textarea.input() fallback, which
+            // would otherwise move one char from the cursor.
+            KeyCode::Left if event.modifiers == KeyModifiers::NONE && self.has_selection() => {
+                self.collapse_selection_to_edge(true);
+                true
+            }
+            KeyCode::Right if event.modifiers == KeyModifiers::NONE && self.has_selection() => {
+                self.collapse_selection_to_edge(false);
+                true
+            }
             // Native behavior: Backspace/Delete with an active selection
             // erases the selection. These must come before the placeholder
             // fast-paths so a selection containing a placeholder deletes
@@ -948,18 +986,7 @@ impl Input {
                 {
                     let offset = self.flat_offset_for_position(target_row, target_col);
                     if let Some(image) = self.image_at_offset(offset) {
-                        match image_attachment::open_path(&image.path, &self.image_open_config) {
-                            Ok(()) => push_toast(Toast::new(
-                                format!("Opened {}", image.placeholder),
-                                ToastLevel::Info,
-                                None,
-                            )),
-                            Err(err) => push_toast(Toast::new(
-                                format!("Failed to open image: {}", err),
-                                ToastLevel::Error,
-                                None,
-                            )),
-                        }
+                        self.pending_file_action = Some(image.path.clone());
                         return true;
                     }
                     if let Some((range, paste)) = self.paste_at_offset(offset) {
@@ -1207,7 +1234,7 @@ impl Input {
 
     fn command_query(&self) -> Option<String> {
         let text = self.get_text();
-        if !text.starts_with('/') || text.contains('\n') {
+        if !text.starts_with('/') || text.chars().any(char::is_whitespace) {
             return None;
         }
         Some(text.trim_start_matches('/').to_string())
@@ -2201,7 +2228,7 @@ impl Input {
                 let text = self.get_text();
                 self.replace_range(0..text.len(), &replacement);
             }
-            SuggestionKind::Agent => {
+            SuggestionKind::Agent | SuggestionKind::Skill => {
                 let Some(token) = self.current_at_token(true) else {
                     return;
                 };
@@ -2247,33 +2274,9 @@ impl Input {
     }
 
     pub fn get_autocomplete_selection(&self, is_chat: bool) -> Option<String> {
-        if let Some(autocomplete) = &self.autocomplete {
-            let suggestions = if let Some(filter) = self.command_query() {
-                autocomplete.command_auto.get_suggestions(&filter, is_chat)
-            } else if let Some(token) = self.current_at_token(true) {
-                let mut suggestions = Vec::new();
-                suggestions.extend(
-                    autocomplete
-                        .agents
-                        .iter()
-                        .filter(|agent| {
-                            agent
-                                .name
-                                .to_ascii_lowercase()
-                                .starts_with(&token.query.to_ascii_lowercase())
-                        })
-                        .cloned(),
-                );
-                suggestions.extend(autocomplete.file_auto.get_suggestions(&token.query));
-                suggestions
-            } else {
-                Vec::new()
-            };
-            if !suggestions.is_empty() {
-                return Some(suggestions[0].name.clone());
-            }
-        }
-        None
+        self.get_autocomplete_suggestions(is_chat)
+            .first()
+            .map(|suggestion| suggestion.name.clone())
     }
 
     pub fn get_text(&self) -> String {
@@ -2414,21 +2417,7 @@ impl Input {
                 return autocomplete.command_auto.get_suggestions(&filter, is_chat);
             }
             if let Some(token) = self.current_at_token(true) {
-                let mut suggestions = Vec::new();
-                suggestions.extend(
-                    autocomplete
-                        .agents
-                        .iter()
-                        .filter(|agent| {
-                            agent
-                                .name
-                                .to_ascii_lowercase()
-                                .starts_with(&token.query.to_ascii_lowercase())
-                        })
-                        .cloned(),
-                );
-                suggestions.extend(autocomplete.file_auto.get_suggestions(&token.query));
-                return suggestions;
+                return autocomplete.mention_suggestions(&token.query);
             }
         }
         Vec::new()
@@ -3139,6 +3128,76 @@ mod tests {
     }
 
     #[test]
+    fn test_skill_autocomplete_is_discovered_with_mentions_not_slashes() {
+        let root = tempfile::tempdir().unwrap();
+        let mut input = Input::new().with_autocomplete(
+            AutoComplete::new_at_with_file_config(
+                crate::autocomplete::CommandAuto::default(),
+                root.path(),
+                false,
+                Vec::new(),
+            )
+            .with_agents(vec![Suggestion::agent("explore", "Explore code")])
+            .with_skills(vec![
+                Suggestion::skill("ratatui", "Build terminal UIs"),
+                Suggestion::skill("codebase-design", "Design deep modules"),
+            ]),
+        );
+        for is_chat in [false, true] {
+            input.set_text("@");
+            let suggestions = input.get_autocomplete_suggestions(is_chat);
+            assert_eq!(suggestions[0].name, "codebase-design");
+            assert_eq!(suggestions[0].kind, SuggestionKind::Skill);
+            assert_eq!(suggestions[1].name, "ratatui");
+            assert_eq!(suggestions[2].kind, SuggestionKind::Agent);
+
+            input.set_text("@CODE");
+            assert_eq!(
+                input.get_autocomplete_suggestions(is_chat),
+                vec![Suggestion::skill("codebase-design", "Design deep modules")]
+            );
+            assert_eq!(
+                input.get_autocomplete_selection(is_chat).as_deref(),
+                Some("codebase-design")
+            );
+
+            input.set_text("/code");
+            assert!(input.get_autocomplete_suggestions(is_chat).is_empty());
+        }
+    }
+
+    #[test]
+    fn test_skill_completion_replaces_only_current_mention() {
+        let mut input = Input::new();
+        input.set_text("Use @code and keep the rest");
+        input.textarea.move_cursor(CursorMove::Jump(0, 9));
+        input.apply_suggestion(&Suggestion::skill("codebase-design", "Design deep modules"));
+        assert_eq!(input.get_text(), "Use @codebase-design  and keep the rest");
+        assert_eq!(input.submission_text(), input.get_text());
+        assert!(!input.should_show_suggestions());
+    }
+
+    #[test]
+    fn test_skill_completion_inside_slash_command_arguments() {
+        let root = tempfile::tempdir().unwrap();
+        let mut input = Input::new().with_autocomplete(
+            AutoComplete::new_at_with_file_config(
+                crate::autocomplete::CommandAuto::default(),
+                root.path(),
+                false,
+                Vec::new(),
+            )
+            .with_skills(vec![Suggestion::skill(
+                "codebase-design",
+                "Design deep modules",
+            )]),
+        );
+        input.set_text("/review @code");
+        input.complete_selection(true);
+        assert_eq!(input.get_text(), "/review @codebase-design ");
+    }
+
+    #[test]
     fn test_wrapped_input_and_paste_increase_height_like_newlines() {
         let mut newline_input = Input::new();
         newline_input.insert_str("a");
@@ -3276,6 +3335,44 @@ mod tests {
         assert!(input.has_active_selection_edge_scroll());
         assert_eq!(input.textarea.cursor(), (0, 14));
         assert_eq!(input.get_selected_text(), "0123456789ABCD");
+    }
+
+    #[test]
+    fn image_click_requests_file_actions_without_opening() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("screenshot.png");
+        std::fs::write(&path, [0, 255]).unwrap();
+        let mut input = Input::new();
+        input.attach_image(path.clone());
+
+        let colors = test_colors();
+        let mut terminal = Terminal::new(TestBackend::new(60, 8)).unwrap();
+        terminal
+            .draw(|frame| {
+                input.render(
+                    frame,
+                    Rect::new(0, 0, 60, 8),
+                    "Plan",
+                    "model",
+                    "provider",
+                    None,
+                    false,
+                    &colors,
+                    true,
+                );
+            })
+            .unwrap();
+        let (x, y) = find_buffer_text(terminal.backend().buffer(), 60, 8, "[Image #1]")
+            .expect("image placeholder rendered");
+        assert!(input.handle_mouse_event(mouse_event_at(
+            MouseEventKind::Down(MouseButton::Left),
+            x,
+            y,
+        )));
+        assert_eq!(input.take_file_action(), Some(path));
+        assert_eq!(input.take_file_action(), None);
     }
 
     #[test]
@@ -3628,6 +3725,49 @@ mod tests {
         assert!(input.has_selection());
         assert_eq!(input.get_selected_text(), "hello world");
         assert_eq!(input.textarea.cursor(), (0, 0));
+    }
+
+    #[test]
+    fn plain_arrows_collapse_multiline_unicode_selection() {
+        for backwards in [false, true] {
+            for arrow in [KeyCode::Left, KeyCode::Right] {
+                let mut input = Input::new();
+                input.insert_str("aé🙂\n中xyz");
+                let (start, end) = ((0, 1), (1, 2));
+                let (anchor, edge) = if backwards {
+                    (end, start)
+                } else {
+                    (start, end)
+                };
+                input
+                    .textarea
+                    .move_cursor(CursorMove::Jump(anchor.0, anchor.1));
+                input.textarea.start_selection();
+                input.textarea.move_cursor(CursorMove::Jump(edge.0, edge.1));
+
+                assert!(input.handle_event(key_event(arrow)));
+                assert!(!input.has_selection());
+                assert_eq!(input.get_text(), "aé🙂\n中xyz");
+                assert_eq!(
+                    input.textarea.cursor(),
+                    if arrow == KeyCode::Left {
+                        (0, 1)
+                    } else {
+                        (1, 2)
+                    }
+                );
+
+                assert!(input.handle_event(key_event(arrow)));
+                assert_eq!(
+                    input.textarea.cursor(),
+                    if arrow == KeyCode::Left {
+                        (0, 0)
+                    } else {
+                        (1, 3)
+                    }
+                );
+            }
+        }
     }
 
     #[test]

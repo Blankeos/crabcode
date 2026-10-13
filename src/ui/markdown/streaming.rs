@@ -1,5 +1,5 @@
 use crate::theme::ThemeColors;
-use crate::ui::markdown::table::{contains_markdown_table, preprocess_tables};
+use crate::ui::markdown::table::{contains_markdown_table, render_tables};
 use crate::ui::wrapping::{wrap_styled_line, WrapOptions};
 use ratatui::{
     style::{Modifier, Style},
@@ -218,43 +218,29 @@ impl tui_markdown::StyleSheet for MarkdownStyleSheet {
 
 /// Render markdown content to lines
 /// This uses tui-markdown to parse and render the markdown.
-/// Tables are pre-processed and rendered with Unicode box-drawing characters.
+/// Tables are rendered as styled lines with Unicode box-drawing characters.
 pub fn render_markdown(
     content: &str,
     max_width: usize,
     colors: &ThemeColors,
 ) -> Vec<Line<'static>> {
     let max_width = max_width.max(1);
-    // Pre-process tables: render them as Unicode box-drawing text
-    let processed = preprocess_tables(content, max_width);
-
-    render_processed_markdown(processed.as_ref(), max_width, colors)
-}
-
-fn render_processed_markdown(
-    processed: &str,
-    max_width: usize,
-    colors: &ThemeColors,
-) -> Vec<Line<'static>> {
     let mut result = Vec::new();
-    let mut markdown_chunk = String::new();
-
-    for line in processed.split_inclusive('\n') {
-        let line_without_newline = line.strip_suffix('\n').unwrap_or(line);
-        if is_preprocessed_table_line(line_without_newline.trim_end()) {
-            result.extend(render_markdown_chunk(&markdown_chunk, max_width, colors));
-            markdown_chunk.clear();
-            result.push(Line::styled(
-                line_without_newline.trim_end().to_string(),
-                Style::default().fg(colors.markdown_text),
-            ));
-        } else {
-            markdown_chunk.push_str(line);
-        }
+    let mut last_end = 0;
+    for table in render_tables(content, max_width, colors) {
+        result.extend(render_markdown_chunk(
+            &content[last_end..table.source.start],
+            max_width,
+            colors,
+        ));
+        result.extend(table.lines);
+        last_end = table.source.end;
     }
-
-    result.extend(render_markdown_chunk(&markdown_chunk, max_width, colors));
-
+    result.extend(render_markdown_chunk(
+        &content[last_end..],
+        max_width,
+        colors,
+    ));
     result
 }
 
@@ -435,6 +421,8 @@ fn apply_markdown_theme(line: &mut Line<'_>, in_code_block: &mut bool, colors: &
         }
     }
 
+    highlight_task_list_markers(line, colors);
+
     for span in &mut line.spans {
         if span.style.fg.is_some() {
             continue;
@@ -451,6 +439,47 @@ fn apply_markdown_theme(line: &mut Line<'_>, in_code_block: &mut bool, colors: &
 
         span.style = span.style.fg(fg);
     }
+}
+
+/// tui-markdown folds unordered task markers into the bullet span, but emits
+/// ordered task markers in a separate span. Split only those marker spans so
+/// checkbox colors neither bleed into the body nor affect literal inline code.
+fn highlight_task_list_markers(line: &mut Line<'_>, colors: &ThemeColors) {
+    let mut spans = Vec::with_capacity(line.spans.len());
+    let mut after_list_marker = false;
+
+    for span in std::mem::take(&mut line.spans) {
+        let text = span.content.as_ref();
+        let trimmed = text.trim_start();
+        let checkbox_start = if matches!(trimmed, "- [x] " | "- [ ] ") {
+            Some(text.len() - trimmed.len() + 2)
+        } else if after_list_marker && matches!(text, "[x] " | "[ ] ") {
+            Some(0)
+        } else {
+            None
+        };
+        after_list_marker = is_detached_list_marker_text(text);
+
+        if let Some(start) = checkbox_start.filter(|_| span.style.bg.is_none()) {
+            if start > 0 {
+                spans.push(Span::styled(text[..start].to_string(), span.style));
+            }
+            let color = if &text[start..start + 3] == "[x]" {
+                colors.success
+            } else {
+                colors.text_weak
+            };
+            spans.push(Span::styled(
+                text[start..start + 3].to_string(),
+                span.style.fg(color),
+            ));
+            spans.push(Span::styled(text[start + 3..].to_string(), span.style));
+        } else {
+            spans.push(span);
+        }
+    }
+
+    line.spans = spans;
 }
 
 fn style_line(line: &mut Line<'_>, style: Style) {
@@ -748,6 +777,296 @@ mod tests {
         assert!(rendered.iter().any(|line| line.starts_with("2. Added")));
         assert!(!rendered.iter().any(|line| line.trim_end() == "1."));
         assert!(!rendered.iter().any(|line| line.trim_end() == "2."));
+    }
+
+    #[test]
+    fn vercel_list_markers_are_blue_in_both_modes() {
+        for (id, dark, expected) in [
+            ("vercel", true, Color::Rgb(0x52, 0xa8, 0xff)),
+            ("vercel-light", false, Color::Rgb(0x00, 0x70, 0xf3)),
+        ] {
+            let theme = crate::theme::Theme::bundled_themes()
+                .into_iter()
+                .find(|theme| theme.id == id)
+                .unwrap();
+            let colors = theme.get_colors(dark);
+            assert_eq!(colors.markdown_list_item, expected);
+            assert_eq!(colors.markdown_list_enumeration, expected);
+            let lines = render_markdown("- Plain\n- [x] Done\n- [ ] Pending\n\n1. First\n2. **Second**\n3. [x] Third\n4. [ ] Fourth\n", 80, &colors);
+            let spans: Vec<_> = lines.iter().flat_map(|line| &line.spans).collect();
+            for marker in ["-", "1.", "2.", "3.", "4."] {
+                let matches: Vec<_> = spans
+                    .iter()
+                    .filter(|span| span.content.trim() == marker)
+                    .collect();
+                assert!(!matches.is_empty(), "missing {marker} for {id}");
+                assert!(matches.iter().all(|span| span.style.fg == Some(expected)));
+            }
+            assert!(spans
+                .iter()
+                .any(|span| span.content == "[x]" && span.style.fg == Some(colors.success)));
+            assert!(spans
+                .iter()
+                .any(|span| span.content == "[ ]" && span.style.fg == Some(colors.text_weak)));
+        }
+    }
+
+    #[test]
+    fn checklist_markers_use_theme_colors() {
+        let colors = test_colors();
+        let input = "- [x] Completed\n- [X] Uppercase\n- [ ] Pending\n  - [x] Nested\n\n1. [x] Ordered\n2. [ ] Waiting\n";
+        let lines = render_markdown(input, 80, &colors);
+        let spans: Vec<_> = lines.iter().flat_map(|line| &line.spans).collect();
+
+        let checked: Vec<_> = spans.iter().filter(|span| span.content == "[x]").collect();
+        assert_eq!(checked.len(), 4);
+        assert!(checked
+            .iter()
+            .all(|span| span.style.fg == Some(colors.success)));
+        let unchecked: Vec<_> = spans.iter().filter(|span| span.content == "[ ]").collect();
+        assert_eq!(unchecked.len(), 2);
+        assert!(unchecked
+            .iter()
+            .all(|span| span.style.fg == Some(colors.text_weak)));
+        for body in [
+            "Completed",
+            "Uppercase",
+            "Pending",
+            "Nested",
+            "Ordered",
+            "Waiting",
+        ] {
+            let span = spans.iter().find(|span| span.content == body).unwrap();
+            assert_eq!(span.style.fg, Some(colors.markdown_text));
+        }
+        for span in spans.iter().filter(|span| span.content.trim() == "-") {
+            assert_eq!(span.style.fg, Some(colors.markdown_list_item));
+        }
+    }
+
+    #[test]
+    fn checklist_colors_follow_theme_overrides_and_cached_theme_changes() {
+        let mut colors = test_colors();
+        colors.success = ratatui::style::Color::Rgb(193, 42, 129);
+        colors.text_weak = ratatui::style::Color::Rgb(37, 138, 207);
+        let mut renderer = SimpleStreamingRenderer::new();
+        renderer.append("- [x] Done\n- [ ] Pending\n");
+
+        for (checked, unchecked) in [
+            (colors.success, colors.text_weak),
+            (
+                ratatui::style::Color::Rgb(222, 150, 39),
+                ratatui::style::Color::Rgb(143, 75, 201),
+            ),
+        ] {
+            colors.success = checked;
+            colors.text_weak = unchecked;
+            assert!(renderer.ensure_rendered(80, &colors, false));
+            let spans: Vec<_> = renderer
+                .rendered_lines()
+                .unwrap()
+                .iter()
+                .flat_map(|line| &line.spans)
+                .collect();
+            assert!(spans
+                .iter()
+                .any(|span| span.content == "[x]" && span.style.fg == Some(checked)));
+            assert!(spans
+                .iter()
+                .any(|span| span.content == "[ ]" && span.style.fg == Some(unchecked)));
+        }
+    }
+
+    #[test]
+    fn checklist_colors_survive_wrapping_without_coloring_body() {
+        let colors = test_colors();
+        let input = "- [x] **Completed** with several words wrapping onto more lines\n- [ ] *Pending* with several words wrapping onto more lines\n";
+        let lines = render_markdown(input, 24, &colors);
+        assert!(lines.len() > 2);
+        assert!(lines.iter().all(|line| line.width() <= 24));
+        let spans: Vec<_> = lines.iter().flat_map(|line| &line.spans).collect();
+        assert!(spans
+            .iter()
+            .any(|span| span.content == "[x]" && span.style.fg == Some(colors.success)));
+        assert!(spans
+            .iter()
+            .any(|span| span.content == "[ ]" && span.style.fg == Some(colors.text_weak)));
+        assert!(spans.iter().any(|span| span.content == "Completed"
+            && span.style.add_modifier.contains(Modifier::BOLD)
+            && span.style.fg == Some(colors.markdown_strong)));
+        assert!(spans.iter().any(|span| span.content == "Pending"
+            && span.style.add_modifier.contains(Modifier::ITALIC)
+            && span.style.fg == Some(colors.markdown_emph)));
+        for span in spans
+            .iter()
+            .filter(|span| span.content.contains("words") || span.content.contains("lines"))
+        {
+            assert_eq!(span.style.fg, Some(colors.markdown_text));
+        }
+    }
+
+    #[test]
+    fn checklist_like_literals_are_not_highlighted() {
+        let mut colors = test_colors();
+        // Syntax-highlighted code may independently use green. Use a distinct
+        // theme color to detect checklist highlighting, not syntax colors.
+        colors.success = ratatui::style::Color::Rgb(197, 43, 131);
+        let input = "Prose [x] and [ ] are literal.\n\n- `[x] ` **code**\n- \\[x\\] **escaped**\n\n1. `[ ] ` **code**\n2. \\[x\\] **escaped**\n\n```markdown\n- [x] literal\n- [ ] literal\n```\n\n    - [x] indented code\n";
+        let lines = render_markdown(input, 80, &colors);
+        for span in lines.iter().flat_map(|line| &line.spans) {
+            assert_ne!(span.style.fg, Some(colors.success), "{span:?}");
+        }
+        let output = lines
+            .iter()
+            .map(line_to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(output.contains("- [x] literal"));
+        assert!(output.contains("- [ ] literal"));
+    }
+
+    #[test]
+    fn table_inline_formatting_survives_wrapping() {
+        let colors = test_colors();
+        let input = "| Feature | Example |\n| --- | --- |\n| Bold | **bold words across lines** |\n| Italic | *italic words across lines* |\n| Code | `code words across lines` |\n| Link | [linked words across lines](https://example.com) |\n| Nested | ***nested words across lines*** |\n| Strike | ~~deleted words across lines~~ |\n";
+
+        for width in [30, 60, 100] {
+            let lines = render_markdown(input, width, &colors);
+            let output = lines
+                .iter()
+                .map(line_to_string)
+                .collect::<Vec<_>>()
+                .join("\n");
+            for (word, modifier, fg, bg) in [
+                ("bold", Modifier::BOLD, colors.markdown_strong, None),
+                ("italic", Modifier::ITALIC, colors.markdown_emph, None),
+                (
+                    "code",
+                    Modifier::empty(),
+                    colors.markdown_code,
+                    Some(colors.background_element),
+                ),
+                ("linked", Modifier::UNDERLINED, colors.markdown_link, None),
+                (
+                    "nested",
+                    Modifier::BOLD | Modifier::ITALIC,
+                    colors.markdown_strong,
+                    None,
+                ),
+                ("deleted", Modifier::CROSSED_OUT, colors.markdown_text, None),
+            ] {
+                let span = lines
+                    .iter()
+                    .flat_map(|line| &line.spans)
+                    .find(|span| span.content.contains(word))
+                    .unwrap_or_else(|| panic!("missing {word}:\n{output}"));
+                assert!(
+                    span.style.add_modifier.contains(modifier),
+                    "{word}: {span:?}"
+                );
+                assert_eq!(span.style.fg, Some(fg), "{word}");
+                assert_eq!(span.style.bg, bg, "{word}");
+                let styled_text = lines
+                    .iter()
+                    .flat_map(|line| &line.spans)
+                    .filter(|candidate| candidate.style == span.style)
+                    .flat_map(|candidate| candidate.content.split_whitespace())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                assert!(
+                    styled_text.contains(&format!("{word} words across lines")),
+                    "style lost after wrapping: {styled_text}"
+                );
+            }
+            assert!(
+                !output.contains("**") && !output.contains('`') && !output.contains("~~"),
+                "{output}"
+            );
+            for line in &lines {
+                assert!(line.width() <= width, "{output}");
+                for span in &line.spans {
+                    if span.content.contains('│') || span.content.trim().is_empty() {
+                        assert!(
+                            span.style.add_modifier.is_empty(),
+                            "border/padding inherited a style: {span:?}"
+                        );
+                        assert_eq!(span.style.bg, None);
+                    }
+                }
+            }
+            let styled_words = lines
+                .iter()
+                .flat_map(|line| &line.spans)
+                .filter(|span| span.style.add_modifier.contains(Modifier::BOLD))
+                .flat_map(|span| span.content.split_whitespace())
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert_eq!(
+                styled_words, "bold words across lines nested words across lines",
+                "{output}"
+            );
+        }
+    }
+
+    #[test]
+    fn table_literal_code_examples_are_not_reparsed_as_markdown() {
+        let colors = test_colors();
+        let input = "| Feature | Syntax |\n| --- | --- |\n| Bold | `**text**` |\n| Italic | `*text*` |\n| Inline code | `` `code` `` |\n";
+        let lines = render_markdown(input, 60, &colors);
+        for literal in ["**text**", "*text*", "`code`"] {
+            let span = lines
+                .iter()
+                .flat_map(|line| &line.spans)
+                .find(|span| span.content == literal)
+                .unwrap();
+            assert_eq!(span.style.fg, Some(colors.markdown_code));
+            assert!(!span
+                .style
+                .add_modifier
+                .intersects(Modifier::BOLD | Modifier::ITALIC));
+        }
+    }
+
+    #[test]
+    fn table_styles_end_at_inline_and_cell_boundaries() {
+        let colors = test_colors();
+        let input = "| First | Second |\n| --- | --- |\n| **outer *inner* tail** plain | neighbor |\n| \\*literal\\* | plain again |\n| | **next** |\n";
+        let lines = render_markdown(input, 50, &colors);
+        let spans = lines
+            .iter()
+            .flat_map(|line| &line.spans)
+            .collect::<Vec<_>>();
+        let inner = spans
+            .iter()
+            .find(|span| span.content.contains("inner"))
+            .unwrap();
+        assert!(inner
+            .style
+            .add_modifier
+            .contains(Modifier::BOLD | Modifier::ITALIC));
+        let tail = spans
+            .iter()
+            .find(|span| span.content.contains("tail"))
+            .unwrap();
+        assert!(tail.style.add_modifier.contains(Modifier::BOLD));
+        assert!(!tail.style.add_modifier.contains(Modifier::ITALIC));
+        for word in ["plain", "neighbor", "literal"] {
+            for span in spans.iter().filter(|span| span.content.contains(word)) {
+                assert!(span.style.add_modifier.is_empty(), "{span:?}");
+                assert_eq!(span.style.fg, Some(colors.markdown_text));
+            }
+        }
+        let output = lines
+            .iter()
+            .map(line_to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(output.contains("*literal*"), "{output}");
+        let next_row = output.lines().find(|line| line.contains("next")).unwrap();
+        assert!(
+            next_row.split('│').nth(1).unwrap().trim().is_empty(),
+            "empty cell should retain its column:\n{output}"
+        );
     }
 
     #[test]

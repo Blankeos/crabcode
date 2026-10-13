@@ -15,6 +15,264 @@ pub struct Workspace {
     pub last_opened_at: i64,
 }
 
+fn message_cost(message: &Message) -> f64 {
+    message
+        .cost
+        .unwrap_or_else(|| usage_cost_from_parts(&message.parts))
+}
+
+#[cfg(test)]
+mod usage_part_tests {
+    use super::*;
+
+    fn test_dao() -> HistoryDAO {
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_migrations(&mut conn).unwrap();
+        let workspace_id = ensure_workspace(&conn, "/tmp/workspace", "workspace").unwrap();
+        HistoryDAO {
+            conn,
+            current_workspace_id: workspace_id,
+            current_workspace_path: "/tmp/workspace".to_string(),
+            current_workspace_name: "workspace".to_string(),
+        }
+    }
+
+    #[test]
+    fn remove_preserves_prefix_rows_and_rolls_back_on_failure() {
+        let dao = test_dao();
+        let id = dao.create_session("undo", "Undo".into()).unwrap();
+        let timestamp = dao.get_session(id).unwrap().unwrap().created_at + 10;
+        for index in 0..4 {
+            let mut message: Message =
+                crate::session::types::Message::user(format!("message {index}")).into();
+            message.id = format!("message-{index}");
+            message.session_id = id;
+            message.timestamp = timestamp;
+            message.tokens_used = 10;
+            message.cost = Some(0.25);
+            dao.add_message(&message).unwrap();
+        }
+        // Structural regression guard: undo must never rewrite the retained
+        // prefix, even when all timestamps are identical.
+        dao.conn.execute_batch("
+            CREATE TRIGGER protect_prefix_delete BEFORE DELETE ON messages
+            WHEN OLD.id IN ('message-0', 'message-1') BEGIN SELECT RAISE(ABORT, 'prefix deleted'); END;
+            CREATE TRIGGER protect_prefix_update BEFORE UPDATE ON messages
+            BEGIN SELECT RAISE(ABORT, 'prefix rewritten'); END;
+            CREATE TRIGGER fail_undo BEFORE UPDATE ON sessions
+            BEGIN SELECT RAISE(ABORT, 'stats failed'); END;
+        ").unwrap();
+        assert!(dao
+            .remove_messages(id, &["message-2", "message-3"])
+            .is_err());
+        assert_eq!(dao.get_messages(id).unwrap().len(), 4);
+        assert_eq!(dao.get_session(id).unwrap().unwrap().total_tokens, 40);
+        dao.conn.execute_batch("DROP TRIGGER fail_undo").unwrap();
+        assert_eq!(
+            dao.remove_messages(id, &["message-2", "message-3"])
+                .unwrap(),
+            timestamp
+        );
+        let retained = dao.get_messages(id).unwrap();
+        assert_eq!(
+            retained.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            vec!["message-0", "message-1"]
+        );
+        let session = dao.get_session(id).unwrap().unwrap();
+        assert_eq!(session.total_tokens, 20);
+        assert_eq!(session.total_cost, 0.5);
+        assert_eq!(session.total_time_sec, 10.0);
+        assert_eq!(session.avg_tokens_per_sec, 2.0);
+        assert_eq!(session.updated_at, timestamp);
+        dao.conn
+            .execute_batch("DROP TRIGGER protect_prefix_delete")
+            .unwrap();
+        dao.remove_messages(id, &["message-0", "message-1"])
+            .unwrap();
+        assert!(dao.get_messages(id).unwrap().is_empty());
+        let session = dao.get_session(id).unwrap().unwrap();
+        assert_eq!(session.total_tokens, 0);
+        assert_eq!(session.total_cost, 0.0);
+    }
+
+    #[test]
+    fn remove_uses_identities_not_timestamp_order_and_scopes_session() {
+        let dao = test_dao();
+        let id = dao.create_session("identity", "Identity".into()).unwrap();
+        let other = dao.create_session("other", "Other".into()).unwrap();
+        let ids = [
+            "u0", "a0", "u1", "a1", "summary", "tail_u", "tail_a", "marker",
+        ];
+        for (name, timestamp) in ids.iter().zip([90, 100, 100, 100, 99, 100, 101, 110]) {
+            let mut message: Message = crate::session::types::Message::user(*name).into();
+            message.id = name.to_string();
+            message.session_id = id;
+            message.timestamp = timestamp;
+            message.tokens_used = 10;
+            message.cost = Some(0.25);
+            dao.add_message(&message).unwrap();
+        }
+        let mut foreign: Message = crate::session::types::Message::user("foreign").into();
+        foreign.session_id = other;
+        dao.add_message(&foreign).unwrap();
+        let previous = dao.get_session(id).unwrap().unwrap().updated_at;
+        dao.conn
+            .execute_batch(
+                "CREATE TRIGGER no_session_update BEFORE UPDATE ON sessions
+            BEGIN SELECT RAISE(ABORT, 'unexpected update'); END;",
+            )
+            .unwrap();
+        assert_eq!(dao.remove_messages(id, &[]).unwrap(), previous);
+        assert_eq!(
+            dao.remove_messages(id, &[&foreign.id, "missing"]).unwrap(),
+            previous
+        );
+        dao.conn
+            .execute_batch("DROP TRIGGER no_session_update")
+            .unwrap();
+        let mut removed = ids[2..].to_vec();
+        removed.extend([foreign.id.as_str(), "u1"]); // duplicate must not double-subtract
+        assert_eq!(dao.remove_messages(id, &removed).unwrap(), 100);
+        assert_eq!(
+            dao.get_messages(id)
+                .unwrap()
+                .iter()
+                .map(|m| m.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["u0", "a0"]
+        );
+        assert_eq!(dao.get_messages(other).unwrap()[0].id, foreign.id);
+        let session = dao.get_session(id).unwrap().unwrap();
+        assert_eq!(session.total_tokens, 20);
+        assert_eq!(session.total_cost, 0.5);
+    }
+
+    #[test]
+    fn remove_subtracts_authoritative_and_legacy_usage() {
+        let dao = test_dao();
+        let id = dao
+            .create_session("undo-usage", "Undo usage".into())
+            .unwrap();
+        for index in 0..3 {
+            let mut message: Message = crate::session::types::Message::user("usage").into();
+            message.session_id = id;
+            message.id = format!("usage-{index}");
+            message.tokens_used = 5;
+            message.cost = None;
+            message.parts.push(MessagePart {
+                part_type: "usage".into(),
+                data: serde_json::json!({"cost": 0.125}),
+            });
+            if index == 2 {
+                message.usage_authoritative = true;
+                message.input_tokens = Some(100);
+                message.output_tokens = Some(20);
+                message.cache_read_tokens = Some(10);
+                message.cache_write_tokens = Some(5);
+            }
+            dao.add_message(&message).unwrap();
+        }
+        assert_eq!(dao.get_session(id).unwrap().unwrap().total_tokens, 145);
+        dao.remove_messages(id, &["usage-1", "usage-2"]).unwrap();
+        let session = dao.get_session(id).unwrap().unwrap();
+        assert_eq!(session.total_tokens, 5);
+        assert_eq!(session.total_cost, 0.125);
+    }
+
+    #[test]
+    #[ignore = "synthetic undo persistence benchmark"]
+    fn benchmark_remove_large_history() {
+        let dao = test_dao();
+        let id = dao
+            .create_session("undo-bench", "Undo bench".into())
+            .unwrap();
+        let messages: Vec<Message> = (0..146)
+            .map(|_| {
+                let mut message: Message =
+                    crate::session::types::Message::user("x".repeat(48_000)).into();
+                message.session_id = id;
+                message
+            })
+            .collect();
+        dao.replace_messages(id, &messages).unwrap();
+        let start = std::time::Instant::now();
+        dao.replace_messages(id, &messages[..144]).unwrap();
+        let replace = start.elapsed();
+        dao.replace_messages(id, &messages).unwrap();
+        let start = std::time::Instant::now();
+        dao.remove_messages(
+            id,
+            &messages[144..]
+                .iter()
+                .map(|m| m.id.as_str())
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        eprintln!(
+            "146 x 48KB synthetic messages: replace={replace:?}, remove={:?}",
+            start.elapsed()
+        );
+        assert_eq!(dao.get_messages(id).unwrap().len(), 144);
+    }
+
+    #[test]
+    fn authoritative_usage_updates_message_and_session_totals() {
+        let dao = test_dao();
+        let session_id = dao
+            .create_session("session", "Session".to_string())
+            .unwrap();
+        let message = Message {
+            id: "message".to_string(),
+            session_id,
+            role: "assistant".to_string(),
+            parts: Vec::new(),
+            timestamp: chrono::Utc::now().timestamp(),
+            tokens_used: 5,
+            model: Some("model".to_string()),
+            provider: Some("provider".to_string()),
+            agent_mode: None,
+            duration_ms: 10,
+            t0_ms: None,
+            t1_ms: None,
+            tn_ms: None,
+            output_tokens: Some(25),
+            input_tokens: Some(100),
+            cache_read_tokens: Some(60),
+            cache_write_tokens: Some(10),
+            cost: Some(0.0125),
+            usage_authoritative: true,
+            tokens_per_sec: Some(50.0),
+        };
+
+        dao.add_message(&message).unwrap();
+        let restored = dao.get_messages(session_id).unwrap();
+        assert_eq!(restored[0].input_tokens, Some(100));
+        assert_eq!(restored[0].output_tokens, Some(25));
+        assert_eq!(restored[0].cache_read_tokens, Some(60));
+        assert_eq!(restored[0].cache_write_tokens, Some(10));
+        assert_eq!(restored[0].cost, Some(0.0125));
+        assert!(restored[0].usage_authoritative);
+        assert_eq!(restored[0].tokens_per_sec, Some(50.0));
+        let session = dao.get_session(session_id).unwrap().unwrap();
+        assert_eq!(session.total_tokens, 195);
+        assert!((session.total_cost - 0.0125).abs() < f64::EPSILON);
+    }
+}
+
+fn message_total_tokens(message: &Message) -> i32 {
+    if message.usage_authoritative {
+        let total = message
+            .input_tokens
+            .unwrap_or(0)
+            .saturating_add(message.output_tokens.unwrap_or(0))
+            .saturating_add(message.cache_read_tokens.unwrap_or(0))
+            .saturating_add(message.cache_write_tokens.unwrap_or(0));
+        i32::try_from(total).unwrap_or(i32::MAX)
+    } else {
+        message.tokens_used
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
     pub id: i64,
@@ -62,6 +320,11 @@ pub struct Message {
     pub t1_ms: Option<i64>,
     pub tn_ms: Option<i64>,
     pub output_tokens: Option<i64>,
+    pub input_tokens: Option<i64>,
+    pub cache_read_tokens: Option<i64>,
+    pub cache_write_tokens: Option<i64>,
+    pub cost: Option<f64>,
+    pub usage_authoritative: bool,
     pub tokens_per_sec: Option<f64>,
 }
 
@@ -73,6 +336,19 @@ pub struct HistoryDAO {
 }
 
 impl HistoryDAO {
+    #[cfg(test)]
+    pub(crate) fn open_test_database(path: &Path) -> Result<Self> {
+        let mut conn = Connection::open(path)?;
+        run_migrations(&mut conn)?;
+        let workspace_id = ensure_workspace(&conn, "/tmp/workspace", "workspace")?;
+        Ok(Self {
+            conn,
+            current_workspace_id: workspace_id,
+            current_workspace_path: "/tmp/workspace".into(),
+            current_workspace_name: "workspace".into(),
+        })
+    }
+
     pub fn new() -> Result<Self> {
         Self::new_for_workspace(crate::utils::cwd::current_dir_or_dot())
     }
@@ -439,9 +715,10 @@ impl HistoryDAO {
         self.conn.execute(
             "INSERT INTO messages (
                  id, session_id, role, parts, timestamp, tokens_used, model, provider, agent_mode, duration_ms,
-                 t0_ms, t1_ms, tn_ms, output_tokens, tokens_per_sec
+                 t0_ms, t1_ms, tn_ms, output_tokens, input_tokens, cache_read_tokens,
+                 cache_write_tokens, cost, usage_authoritative, tokens_per_sec
              )
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
             params![
                 &msg.id,
                 msg.session_id,
@@ -457,16 +734,17 @@ impl HistoryDAO {
                 msg.t1_ms,
                 msg.tn_ms,
                 msg.output_tokens,
+                msg.input_tokens,
+                msg.cache_read_tokens,
+                msg.cache_write_tokens,
+                msg.cost,
+                msg.usage_authoritative,
                 msg.tokens_per_sec,
             ],
         )?;
 
-        self.update_session_stats(
-            msg.session_id,
-            msg.tokens_used,
-            usage_cost_from_parts(&msg.parts),
-            msg.timestamp,
-        )?;
+        let tokens = message_total_tokens(msg);
+        self.update_session_stats(msg.session_id, tokens, message_cost(msg), msg.timestamp)?;
         Ok(())
     }
 
@@ -490,15 +768,16 @@ impl HistoryDAO {
             let mut insert = tx.prepare_cached(
                 "INSERT INTO messages (
                      id, session_id, role, parts, timestamp, tokens_used, model, provider, agent_mode, duration_ms,
-                     t0_ms, t1_ms, tn_ms, output_tokens, tokens_per_sec
+                     t0_ms, t1_ms, tn_ms, output_tokens, input_tokens, cache_read_tokens,
+                     cache_write_tokens, cost, usage_authoritative, tokens_per_sec
                  )
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
             )?;
 
             for msg in messages {
                 let parts_json = serde_json::to_string(&msg.parts)?;
-                total_tokens += msg.tokens_used as i64;
-                total_cost += usage_cost_from_parts(&msg.parts);
+                total_tokens += i64::from(message_total_tokens(msg));
+                total_cost += message_cost(msg);
                 updated_at = msg.timestamp;
 
                 insert.execute(params![
@@ -516,6 +795,11 @@ impl HistoryDAO {
                     msg.t1_ms,
                     msg.tn_ms,
                     msg.output_tokens,
+                    msg.input_tokens,
+                    msg.cache_read_tokens,
+                    msg.cache_write_tokens,
+                    msg.cost,
+                    msg.usage_authoritative,
                     msg.tokens_per_sec,
                 ])?;
             }
@@ -534,12 +818,12 @@ impl HistoryDAO {
 
         tx.execute(
             "UPDATE sessions
-             SET total_tokens = ?1,
-                 total_cost = ?2,
-                 total_time_sec = ?3,
-                 avg_tokens_per_sec = ?4,
-                 updated_at = ?5
-             WHERE id = ?6",
+              SET total_tokens = ?1,
+                  total_cost = ?2,
+                  total_time_sec = ?3,
+                  avg_tokens_per_sec = ?4,
+                  updated_at = ?5
+              WHERE id = ?6",
             params![
                 total_tokens,
                 total_cost,
@@ -555,10 +839,74 @@ impl HistoryDAO {
         Ok(())
     }
 
+    /// Remove only the supplied message identities within this session, without
+    /// decoding or rewriting retained bodies. Deletion and aggregate updates
+    /// commit atomically; transcript order need not match timestamp order.
+    pub fn remove_messages(&self, session_id: i64, message_ids: &[&str]) -> Result<i64> {
+        let tx = self.conn.unchecked_transaction()?;
+        let previous_updated_at: i64 = tx.query_row(
+            "SELECT updated_at FROM sessions WHERE id = ?1",
+            params![session_id],
+            |row| row.get(0),
+        )?;
+        if message_ids.is_empty() {
+            return Ok(previous_updated_at);
+        }
+        // One parameter avoids SQLite's variable limit for large undo suffixes.
+        let ids = serde_json::to_string(message_ids)?;
+        let (removed_tokens, removed_cost): (i64, f64) = tx.query_row(
+            "SELECT COALESCE(SUM(CASE WHEN usage_authoritative THEN
+                MIN(2147483647, COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)
+                    + COALESCE(cache_read_tokens, 0) + COALESCE(cache_write_tokens, 0))
+                ELSE tokens_used END), 0),
+                COALESCE(SUM(COALESCE(cost, (SELECT SUM(json_extract(value, '$.cost'))
+                    FROM json_each(messages.parts) WHERE json_extract(value, '$.type') = 'usage'))), 0.0)
+             FROM messages WHERE session_id = ?1
+                AND id IN (SELECT value FROM json_each(?2))",
+            params![session_id, ids],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let removed = tx.execute(
+            "DELETE FROM messages WHERE session_id = ?1
+                AND id IN (SELECT value FROM json_each(?2))",
+            params![session_id, ids],
+        )?;
+        if removed == 0 {
+            return Ok(previous_updated_at);
+        }
+        let last_timestamp: Option<i64> = tx.query_row(
+            "SELECT MAX(timestamp) FROM messages WHERE session_id = ?1",
+            params![session_id],
+            |row| row.get(0),
+        )?;
+        let (tokens, cost): (i64, f64) = if last_timestamp.is_some() {
+            tx.query_row(
+                "SELECT MAX(0, total_tokens - ?1), MAX(0.0, total_cost - ?2)
+                 FROM sessions WHERE id = ?3",
+                params![removed_tokens, removed_cost, session_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?
+        } else {
+            (0, 0.0)
+        };
+        let updated_at = last_timestamp.unwrap_or_else(|| chrono::Utc::now().timestamp());
+        tx.execute(
+            "UPDATE sessions SET total_tokens = ?1, total_cost = ?2,
+                total_time_sec = MAX(0, ?3 - created_at),
+                avg_tokens_per_sec = CASE WHEN ?3 > created_at
+                    THEN CAST(?1 AS REAL) / (?3 - created_at) ELSE 0.0 END,
+                updated_at = ?3 WHERE id = ?4",
+            params![tokens, cost, updated_at, session_id],
+        )?;
+        tx.commit()?;
+        Ok(updated_at)
+    }
+
     pub fn get_messages(&self, session_id: i64) -> Result<Vec<Message>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, session_id, role, parts, timestamp, tokens_used, model, provider, agent_mode, duration_ms,
-                    t0_ms, t1_ms, tn_ms, output_tokens, tokens_per_sec
+                    t0_ms, t1_ms, tn_ms, output_tokens, input_tokens, cache_read_tokens,
+                    cache_write_tokens, cost, usage_authoritative, tokens_per_sec
              FROM messages WHERE session_id = ?1 ORDER BY timestamp ASC, rowid ASC",
         )?;
 
@@ -581,7 +929,12 @@ impl HistoryDAO {
                 t1_ms: row.get(11)?,
                 tn_ms: row.get(12)?,
                 output_tokens: row.get(13)?,
-                tokens_per_sec: row.get(14).unwrap_or(None),
+                input_tokens: row.get(14)?,
+                cache_read_tokens: row.get(15)?,
+                cache_write_tokens: row.get(16)?,
+                cost: row.get(17)?,
+                usage_authoritative: row.get(18)?,
+                tokens_per_sec: row.get(19)?,
             })
         })?;
 

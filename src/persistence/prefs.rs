@@ -1,7 +1,8 @@
 use crate::model::reasoning::{parse_effort, ReasoningEffort};
 use anyhow::Result;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 
 use super::{ensure_data_dir, get_data_dir};
 
@@ -11,6 +12,7 @@ const THEME_TRANSPARENT_KEY: &str = "theme_transparent";
 const TERMINAL_TITLE_ITEMS_KEY: &str = "terminal_title_items";
 const COMPACT_MODE_KEY: &str = "compact_mode";
 const SLASH_MRU_KEY: &str = "slash_mru";
+const DISABLED_SKILLS_KEY: &str = "disabled_skills";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelRef {
@@ -142,6 +144,13 @@ impl PrefsDAO {
         Ok(Self { conn })
     }
 
+    #[cfg(test)]
+    pub(crate) fn in_memory() -> Self {
+        let mut conn = Connection::open_in_memory().unwrap();
+        super::migrations::run_migrations(&mut conn).unwrap();
+        Self { conn }
+    }
+
     fn get_pref(&self, key: &str) -> Result<Option<String>> {
         let mut stmt = self
             .conn
@@ -216,6 +225,29 @@ impl PrefsDAO {
 
     pub fn set_compact_mode(&self, enabled: bool) -> Result<()> {
         self.set_pref(COMPACT_MODE_KEY, &enabled.to_string())
+    }
+
+    /// Skills are enabled by default; only explicitly disabled names are saved.
+    pub fn get_disabled_skills(&self) -> Result<BTreeSet<String>> {
+        match self.get_pref(DISABLED_SKILLS_KEY)? {
+            Some(value) => Ok(serde_json::from_str(&value)?),
+            None => Ok(BTreeSet::new()),
+        }
+    }
+
+    pub fn set_skill_enabled(&self, name: &str, enabled: bool) -> Result<BTreeSet<String>> {
+        // Reserve the write before reading so other processes cannot overwrite
+        // disabled names from a stale snapshot of this preference.
+        let transaction = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let mut disabled = self.get_disabled_skills()?;
+        if enabled {
+            disabled.remove(name);
+        } else {
+            disabled.insert(name.to_string());
+        }
+        self.set_pref(DISABLED_SKILLS_KEY, &serde_json::to_string(&disabled)?)?;
+        transaction.commit()?;
+        Ok(disabled)
     }
 
     /// Whether the main UI background should be transparent (terminal shows through).
@@ -331,9 +363,127 @@ mod tests {
     use super::*;
 
     fn setup_test_dao() -> PrefsDAO {
-        let mut conn = Connection::open_in_memory().unwrap();
+        PrefsDAO::in_memory()
+    }
+
+    #[test]
+    fn skill_activation_round_trip_preserves_other_disabled_skills() {
+        let dao = setup_test_dao();
+        assert!(dao.get_disabled_skills().unwrap().is_empty());
+
+        dao.set_skill_enabled("alpha", false).unwrap();
+        dao.set_skill_enabled("beta", false).unwrap();
+        dao.set_skill_enabled("alpha", false).unwrap();
+        assert_eq!(
+            dao.get_disabled_skills().unwrap(),
+            ["alpha".to_string(), "beta".to_string()].into()
+        );
+
+        dao.set_skill_enabled("alpha", true).unwrap();
+        assert_eq!(
+            dao.get_disabled_skills().unwrap(),
+            ["beta".to_string()].into()
+        );
+        dao.set_skill_enabled("beta", true).unwrap();
+        assert!(dao.get_disabled_skills().unwrap().is_empty());
+    }
+
+    #[test]
+    fn skill_activation_survives_database_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prefs.db");
+        let mut conn = Connection::open(&path).unwrap();
         super::super::migrations::run_migrations(&mut conn).unwrap();
-        PrefsDAO { conn }
+        let dao = PrefsDAO { conn };
+        dao.set_skill_enabled("saved-skill", false).unwrap();
+        drop(dao);
+
+        let reopened = PrefsDAO {
+            conn: Connection::open(&path).unwrap(),
+        };
+        assert_eq!(
+            reopened.get_disabled_skills().unwrap(),
+            ["saved-skill".to_string()].into()
+        );
+        reopened.set_skill_enabled("saved-skill", true).unwrap();
+        assert!(reopened.get_disabled_skills().unwrap().is_empty());
+    }
+
+    #[test]
+    fn concurrent_skill_activation_updates_preserve_both_writers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prefs.db");
+        let mut conn = Connection::open(&path).unwrap();
+        super::super::migrations::run_migrations(&mut conn).unwrap();
+        drop(conn);
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let writers = ["alpha", "beta"].map(|prefix| {
+            let dao = PrefsDAO {
+                conn: Connection::open(&path).unwrap(),
+            };
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                for index in 0..32 {
+                    dao.set_skill_enabled(&format!("{prefix}-{index}"), false)
+                        .unwrap();
+                }
+            })
+        });
+        for writer in writers {
+            writer.join().unwrap();
+        }
+
+        let dao = PrefsDAO {
+            conn: Connection::open(&path).unwrap(),
+        };
+        let expected = ["alpha", "beta"]
+            .into_iter()
+            .flat_map(|prefix| (0..32).map(move |index| format!("{prefix}-{index}")))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(dao.get_disabled_skills().unwrap(), expected);
+    }
+
+    #[test]
+    fn failed_skill_preference_write_does_not_publish_activation() {
+        let dao = setup_test_dao();
+        let store = crate::skill::SkillStore::for_test(["alpha", "beta"].map(|name| {
+            crate::skill::SkillInfo {
+                name: name.to_string(),
+                description: None,
+                location: format!("/skills/{name}/SKILL.md").into(),
+                content: String::new(),
+            }
+        }));
+        let clone = store.clone();
+        store.set_enabled("alpha", false, &dao).unwrap();
+        dao.conn
+            .execute_batch(
+                "CREATE TRIGGER reject_skill_preferences BEFORE INSERT ON prefs
+                 WHEN NEW.key = 'disabled_skills'
+                 BEGIN SELECT RAISE(ABORT, 'skill preference writes blocked'); END;",
+            )
+            .unwrap();
+
+        assert!(store.set_enabled("alpha", true, &dao).is_err());
+        assert!(store.set_enabled("beta", false, &dao).is_err());
+        assert!(!store.is_enabled("alpha"));
+        assert!(!clone.is_enabled("alpha"));
+        assert!(store.is_enabled("beta"));
+        assert!(clone.is_enabled("beta"));
+        assert_eq!(
+            dao.get_disabled_skills().unwrap(),
+            ["alpha".to_string()].into()
+        );
+
+        // Failed writes also roll back their transaction, allowing a retry.
+        dao.conn
+            .execute_batch("DROP TRIGGER reject_skill_preferences;")
+            .unwrap();
+        store.set_enabled("alpha", true, &dao).unwrap();
+        assert!(clone.is_enabled("alpha"));
+        assert!(dao.get_disabled_skills().unwrap().is_empty());
     }
 
     #[test]

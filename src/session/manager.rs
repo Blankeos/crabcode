@@ -247,6 +247,28 @@ impl SessionManager {
                 let _ = dao.replace_messages(db_id, &persistence_messages);
             }
 
+            if let Some(migration) =
+                crate::persistence::attachments::migrate_messages(&hydrated.messages, id)?
+            {
+                let persistence_messages: Vec<crate::persistence::Message> = migration
+                    .messages
+                    .iter()
+                    .cloned()
+                    .map(|message| {
+                        let mut db_message: crate::persistence::Message = message.into();
+                        db_message.session_id = db_id;
+                        db_message
+                    })
+                    .collect();
+                if let Err(error) = dao.replace_messages(db_id, &persistence_messages) {
+                    for path in migration.created {
+                        crate::persistence::attachments::remove_file(&path);
+                    }
+                    return Err(SessionError::PersistenceError(error.to_string()));
+                }
+                hydrated.messages = migration.messages;
+            }
+
             *existing = hydrated;
             self.message_counts
                 .insert(id.to_string(), existing.messages.len());
@@ -738,11 +760,7 @@ impl SessionManager {
         session_id: &str,
         message: &crate::session::types::Message,
     ) -> Result<(), SessionError> {
-        if let Some(session) = self.sessions.get_mut(session_id) {
-            session.add_message(message.clone());
-            self.message_counts
-                .insert(session_id.to_string(), session.messages.len());
-        } else {
+        if !self.sessions.contains_key(session_id) {
             return Err(SessionError::NotFound(session_id.to_string()));
         }
 
@@ -750,11 +768,54 @@ impl SessionManager {
             if let Some(db_id) = self.id_mapping.get(session_id) {
                 let mut db_message: crate::persistence::Message = message.clone().into();
                 db_message.session_id = *db_id;
-                let _ = dao
-                    .add_message(&db_message)
-                    .map_err(|e| SessionError::PersistenceError(e.to_string()));
+                dao.add_message(&db_message)
+                    .map_err(|e| SessionError::PersistenceError(e.to_string()))?;
             }
         }
+
+        let session = self
+            .sessions
+            .get_mut(session_id)
+            .ok_or_else(|| SessionError::NotFound(session_id.to_string()))?;
+        session.add_message(message.clone());
+        self.message_counts
+            .insert(session_id.to_string(), session.messages.len());
+        Ok(())
+    }
+
+    /// Persist a retained prefix before mutating memory, so failed undo leaves
+    /// both the live session and its stored transcript unchanged.
+    pub fn truncate_session_messages(
+        &mut self,
+        session_id: &str,
+        keep: usize,
+    ) -> Result<(), SessionError> {
+        self.hydrate_session(session_id)?;
+        let session = self
+            .sessions
+            .get(session_id)
+            .ok_or_else(|| SessionError::NotFound(session_id.to_string()))?;
+        if keep >= session.messages.len() {
+            return Ok(());
+        }
+        let mut updated_at = session
+            .messages
+            .get(keep.wrapping_sub(1))
+            .map(|message| message.timestamp)
+            .unwrap_or_else(SystemTime::now);
+        if let (Some(dao), Some(db_id)) = (&self.history_dao, self.id_mapping.get(session_id)) {
+            let removed_ids: Vec<&str> = session.messages[keep..]
+                .iter()
+                .map(|message| message.id.as_str())
+                .collect();
+            let timestamp = dao.remove_messages(*db_id, &removed_ids)?;
+            updated_at =
+                std::time::UNIX_EPOCH + std::time::Duration::from_secs(timestamp.max(0) as u64);
+        }
+        let session = self.sessions.get_mut(session_id).unwrap();
+        session.messages.truncate(keep);
+        session.updated_at = updated_at;
+        self.message_counts.insert(session_id.to_string(), keep);
         Ok(())
     }
 
@@ -763,19 +824,15 @@ impl SessionManager {
         session_id: &str,
         messages: Vec<crate::session::types::Message>,
     ) -> Result<(), SessionError> {
-        if let Some(session) = self.sessions.get_mut(session_id) {
-            session.messages = messages.clone();
-            session.updated_at = SystemTime::now();
-            self.message_counts
-                .insert(session_id.to_string(), session.messages.len());
-        } else {
+        if !self.sessions.contains_key(session_id) {
             return Err(SessionError::NotFound(session_id.to_string()));
         }
 
         if let Some(ref dao) = self.history_dao {
             if let Some(db_id) = self.id_mapping.get(session_id) {
                 let persistence_messages: Vec<crate::persistence::Message> = messages
-                    .into_iter()
+                    .iter()
+                    .cloned()
                     .map(|message| {
                         let mut db_message: crate::persistence::Message = message.into();
                         db_message.session_id = *db_id;
@@ -787,6 +844,15 @@ impl SessionManager {
                     .map_err(|e| SessionError::PersistenceError(e.to_string()))?;
             }
         }
+
+        let session = self
+            .sessions
+            .get_mut(session_id)
+            .ok_or_else(|| SessionError::NotFound(session_id.to_string()))?;
+        session.messages = messages;
+        session.updated_at = SystemTime::now();
+        self.message_counts
+            .insert(session_id.to_string(), session.messages.len());
 
         Ok(())
     }
@@ -953,9 +1019,17 @@ impl SessionManager {
     }
 
     pub fn delete_session(&mut self, id: &str) -> bool {
+        self.try_delete_session(id).unwrap_or_else(|error| {
+            crate::emit_log!("Failed to delete session {}: {:?}", id, error);
+            false
+        })
+    }
+
+    pub fn try_delete_session(&mut self, id: &str) -> Result<bool, SessionError> {
         if let Some(db_id) = self.id_mapping.get(id) {
             if let Some(ref dao) = self.history_dao {
-                let _ = dao.delete_session(*db_id);
+                dao.delete_session(*db_id)
+                    .map_err(|error| SessionError::PersistenceError(error.to_string()))?;
             }
         }
 
@@ -977,9 +1051,12 @@ impl SessionManager {
             if self.current_session_id.as_ref() == Some(&id.to_string()) {
                 self.current_session_id = None;
             }
-            true
+            if let Err(error) = crate::persistence::attachments::cleanup_session(id) {
+                crate::emit_log!("Failed to clean session attachments for {}: {}", id, error);
+            }
+            Ok(true)
         } else {
-            false
+            Ok(false)
         }
     }
 }
@@ -1045,6 +1122,100 @@ mod tests {
         assert_eq!(manager.descendant_position(&root, "missing"), None);
         assert_eq!(manager.descendant_position(&root, &root), None);
         assert_eq!(manager.descendant_position(&child_a, &grandchild), Some(0));
+    }
+
+    #[test]
+    fn truncate_session_messages_after_soft_compaction_retains_exact_ids_on_disk() {
+        use crate::session::compaction::{apply_soft_compaction, select_messages_for_compaction};
+        use crate::session::types::{CompactionStats, Message};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.db");
+        let mut manager = SessionManager::new();
+        manager.history_dao = Some(HistoryDAO::open_test_database(&path).unwrap());
+        let id = manager.create_session(None);
+        let mut messages = vec![
+            Message::user("u0"),
+            Message::assistant("a0"),
+            Message::user("u1"),
+            Message::assistant("a1"),
+            Message::user("tail_u"),
+            Message::assistant("tail_a"),
+        ];
+        for (message, timestamp) in messages.iter_mut().zip([90, 100, 100, 100, 100, 101]) {
+            message.timestamp = std::time::UNIX_EPOCH + std::time::Duration::from_secs(timestamp);
+        }
+        messages[1].token_count = Some(3_000);
+        let expected = messages[..2]
+            .iter()
+            .map(|m| m.id.clone())
+            .collect::<Vec<_>>();
+        let selection = select_messages_for_compaction(&messages, 1).unwrap();
+        assert_eq!(selection.summarize_end, 4);
+        let compacted = apply_soft_compaction(
+            &messages,
+            &selection,
+            "summary",
+            None,
+            None,
+            None,
+            CompactionStats {
+                before_tokens: 3_000,
+                after_tokens: 100,
+                before_messages: 6,
+                after_messages: 4,
+            },
+        );
+        assert!(compacted[4].timestamp < compacted[1].timestamp);
+        manager.replace_session_messages(&id, compacted).unwrap();
+        let db_id = manager.id_mapping[&id];
+        manager.truncate_session_messages(&id, 2).unwrap();
+        assert_eq!(
+            manager.sessions[&id]
+                .messages
+                .iter()
+                .map(|m| m.id.clone())
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(manager.message_counts[&id], 2);
+        drop(manager);
+        let reopened = HistoryDAO::open_test_database(&path).unwrap();
+        assert_eq!(
+            reopened
+                .get_messages(db_id)
+                .unwrap()
+                .iter()
+                .map(|m| m.id.clone())
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
+
+    #[test]
+    fn truncate_session_messages_keeps_allocations_and_count() {
+        let mut manager = SessionManager::new();
+        let id = manager.create_session(None);
+        for index in 0..5 {
+            manager
+                .add_message_to_session(
+                    &id,
+                    &crate::session::types::Message::user(format!("message {index}")),
+                )
+                .unwrap();
+        }
+        let prefix_ptr = manager.sessions[&id].messages[0].content.as_ptr();
+        let timestamp = manager.sessions[&id].messages[2].timestamp;
+        manager.truncate_session_messages(&id, 3).unwrap();
+        assert_eq!(manager.sessions[&id].messages.len(), 3);
+        assert_eq!(
+            manager.sessions[&id].messages[0].content.as_ptr(),
+            prefix_ptr
+        );
+        assert_eq!(manager.message_counts[&id], 3);
+        assert_eq!(manager.sessions[&id].updated_at, timestamp);
+        manager.truncate_session_messages(&id, 8).unwrap();
+        assert_eq!(manager.message_counts[&id], 3);
+        assert!(manager.truncate_session_messages("missing", 0).is_err());
     }
 
     #[test]

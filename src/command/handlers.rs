@@ -68,7 +68,6 @@ pub fn handle_sessions<'a>(
                 } else {
                     session.title.clone()
                 };
-
                 crate::command::registry::DialogItem {
                     id: session.id.clone(),
                     name,
@@ -399,6 +398,10 @@ pub async fn load_models(parsed: ParsedCommand) -> CommandResult {
         };
 
         if let Ok(discovery) = discovery.as_ref() {
+            crate::model::discovery::merge_dialog_models(
+                &mut models,
+                discovery.discover_custom_models_for_dialog().await,
+            );
             discovery.apply_custom_models_to_dialog(&mut models);
         }
 
@@ -795,22 +798,29 @@ pub fn handle_skill_command<'a>(
     parsed: &'a ParsedCommand,
     _sm: &'a mut SessionManager,
 ) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>> {
-    let skill_name = parsed.name.clone();
+    Box::pin(async move { skill_command_result(parsed, crate::skill::get_skill_store()) })
+}
 
-    Box::pin(async move {
-        if let Some(store) = crate::skill::get_skill_store() {
-            if let Some(skill) = store.get(&skill_name) {
-                return CommandResult::Success(skill.content.clone());
-            }
-        }
-
-        CommandResult::Error(format!("Unknown command: {}", skill_name))
-    })
+fn skill_command_result(
+    parsed: &ParsedCommand,
+    store: Option<&crate::skill::SkillStore>,
+) -> CommandResult {
+    if store.is_some_and(|store| store.get(&parsed.name).is_some()) {
+        return CommandResult::RunPrompt {
+            prompt: parsed.raw.clone(),
+            agent: None,
+            model: None,
+            subtask: None,
+        };
+    }
+    CommandResult::Error(format!("Unknown command: {}", parsed.name))
 }
 
 pub fn register_skill_commands(registry: &mut Registry) {
     if let Some(store) = crate::skill::get_skill_store() {
-        for skill in store.all() {
+        // Register installed names so enabling a skill does not need a restart.
+        // The handler enforces current availability; these entries are hidden.
+        for skill in store.installed() {
             if registry.has_public_command(&skill.name) {
                 continue;
             }
@@ -875,7 +885,6 @@ pub async fn refresh_models() -> CommandResult {
                 return CommandResult::Success(String::new());
             }
         };
-
         let (providers_result, runtime_result) = tokio::join!(
             discovery.refresh_cache(),
             crate::model::extensions::ModelExtensions::refresh_runtime_models()
@@ -1132,7 +1141,7 @@ pub fn register_all_commands(registry: &mut Registry) {
 
     registry.register(Command {
         name: "skills".to_string(),
-        description: "List available skills".to_string(),
+        description: "View and toggle installed skills".to_string(),
         handler: handle_skills,
         hidden_tokens: vec![],
         chat_only: false,
@@ -1164,6 +1173,52 @@ mod tests {
         let mut registry = Registry::new();
         register_all_commands(&mut registry);
         registry
+    }
+
+    #[test]
+    fn skill_slash_command_runs_the_user_prompt_instead_of_printing_skill_content() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join(".crabcode/skills/test-skill-prompt");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            directory.join("SKILL.md"),
+            "---\nname: test-skill-prompt\ndescription: Test skill\n---\nSkill instructions",
+        )
+        .unwrap();
+        let store = crate::skill::SkillStore::load(&root.path().join("config"), root.path());
+        let crate::command::parser::InputType::Command(parsed) =
+            crate::command::parser::parse_input("/test-skill-prompt what is it")
+        else {
+            panic!("expected a parsed slash command");
+        };
+        assert_eq!(
+            skill_command_result(&parsed, Some(&store)),
+            CommandResult::RunPrompt {
+                prompt: "/test-skill-prompt what is it".to_string(),
+                agent: None,
+                model: None,
+                subtask: None,
+            }
+        );
+        assert_eq!(
+            skill_command_result(&parsed, None),
+            CommandResult::Error("Unknown command: test-skill-prompt".to_string())
+        );
+        let prefs = crate::persistence::PrefsDAO::in_memory();
+        store
+            .set_enabled("test-skill-prompt", false, &prefs)
+            .unwrap();
+        assert_eq!(
+            skill_command_result(&parsed, Some(&store)),
+            CommandResult::Error("Unknown command: test-skill-prompt".to_string())
+        );
+        store
+            .set_enabled("test-skill-prompt", true, &prefs)
+            .unwrap();
+        assert!(matches!(
+            skill_command_result(&parsed, Some(&store)),
+            CommandResult::RunPrompt { .. }
+        ));
     }
 
     #[tokio::test]
@@ -1496,6 +1551,7 @@ mod tests {
             structured_output: false,
             free: false,
             local: true,
+            context_window: None,
             reasoning_options: Vec::new(),
         };
         crate::model::effective_catalog::publish_refreshed_models(vec![marker])

@@ -63,6 +63,7 @@ impl ToolHandler for WriteTool {
         let content = get_string_param(&params, "content")
             .ok_or_else(|| ToolError::Validation("content is required".to_string()))?;
 
+        let old_text = std::fs::read_to_string(&file_path).ok();
         let (is_new, bytes) = write_one_file(&file_path, &content)?;
 
         Ok(ToolResult::new(
@@ -72,7 +73,10 @@ impl ToolHandler for WriteTool {
             } else {
                 format!("Updated file with {} bytes", bytes)
             },
-        ))
+        )
+        .with_metadata("path", serde_json::json!(file_path))
+        .with_metadata("old_text", serde_json::json!(old_text))
+        .with_metadata("new_text", serde_json::json!(content)))
     }
 }
 
@@ -137,6 +141,7 @@ impl ToolHandler for WriteFilesTool {
             .ok_or_else(|| ToolError::Validation("files must be an array".to_string()))?;
 
         let mut summaries = Vec::with_capacity(files.len());
+        let mut changes = Vec::with_capacity(files.len());
         for file in files {
             let file_path = file
                 .get("file_path")
@@ -146,16 +151,23 @@ impl ToolHandler for WriteFilesTool {
                 .get("content")
                 .and_then(Value::as_str)
                 .ok_or_else(|| ToolError::Validation("content is required".to_string()))?;
+            let old_text = std::fs::read_to_string(file_path).ok();
             let (is_new, bytes) = write_one_file(file_path, content)?;
             let action = if is_new { "created" } else { "updated" };
             summaries.push(format!("{file_path}: {action} {bytes} bytes"));
+            changes.push(serde_json::json!({
+                "path": file_path,
+                "old_text": old_text,
+                "new_text": content,
+            }));
         }
 
         Ok(ToolResult::new(
             format!("Write files: {}", summaries.len()),
             summaries.join("\n"),
         )
-        .with_metadata("file_count", serde_json::json!(summaries.len())))
+        .with_metadata("file_count", serde_json::json!(summaries.len()))
+        .with_metadata("changes", serde_json::json!(changes)))
     }
 }
 

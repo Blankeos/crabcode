@@ -2,6 +2,7 @@ pub mod client;
 pub(crate) mod opencode;
 pub mod provider;
 pub mod tool_calls;
+pub(crate) mod turn;
 pub(crate) mod xai_build;
 
 pub use tool_calls::{FunctionCall, ToolCall, ToolCallResult};
@@ -37,6 +38,7 @@ pub enum ChunkMessage {
     },
     PermissionRequest(crate::tools::PermissionPrompt),
     QuestionRequest {
+        tool_call_id: Option<String>,
         questions: serde_json::Value,
         response_tx: tokio::sync::oneshot::Sender<serde_json::Value>,
     },
@@ -49,13 +51,23 @@ pub enum ChunkMessage {
         job_id: String,
         event: BackgroundJobEventKind,
     },
+    TurnStopReason(TurnStopReason),
     End,
     Failed(String),
     Cancelled,
     Metrics {
         token_count: usize,
         duration_ms: u64,
+        usage: Option<crate::aisdk::chunk::TokenUsage>,
+        cost: Option<f64>,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnStopReason {
+    MaxTokens,
+    MaxTurnRequests,
+    Refusal,
 }
 
 #[derive(Debug, Clone)]
