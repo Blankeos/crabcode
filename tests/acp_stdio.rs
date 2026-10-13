@@ -1,7 +1,159 @@
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
+
+// The provider runs locally, while ACP itself runs in a separate process. No
+// process-global environment or external API credentials are needed.
+struct MockCompactionProvider {
+    address: std::net::SocketAddr,
+    requests: std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<Result<(), String>>>,
+}
+
+impl Drop for AcpProcess {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+impl MockCompactionProvider {
+    fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("mock listener");
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let recorded = requests.clone();
+        let stopping = stop.clone();
+        let thread = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(60);
+            let mut regular_turns = 0;
+            while !stopping.load(std::sync::atomic::Ordering::Relaxed) {
+                if Instant::now() >= deadline {
+                    return Err("mock provider deadline exceeded".into());
+                }
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        Self::respond(stream, &recorded, &mut regular_turns)
+                            .map_err(|error| error.to_string())?;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => return Err(error.to_string()),
+                }
+            }
+            Ok(())
+        });
+        Self {
+            address,
+            requests,
+            stop,
+            thread: Some(thread),
+        }
+    }
+
+    fn respond(
+        mut stream: TcpStream,
+        requests: &std::sync::Mutex<Vec<serde_json::Value>>,
+        regular_turns: &mut usize,
+    ) -> std::io::Result<()> {
+        stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+        stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+        let mut reader = BufReader::new(stream.try_clone()?);
+        let mut request_line = String::new();
+        reader.read_line(&mut request_line)?;
+        let mut length = 0;
+        loop {
+            let mut header = String::new();
+            if reader.read_line(&mut header)? == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "HTTP headers",
+                ));
+            }
+            if header == "\r\n" {
+                break;
+            }
+            if let Some((name, value)) = header.split_once(':') {
+                if name.eq_ignore_ascii_case("content-length") {
+                    length = value.trim().parse::<usize>().expect("HTTP content length");
+                }
+            }
+        }
+        let (content_type, body) = if request_line.starts_with("GET /v1/models ") {
+            (
+                "application/json",
+                serde_json::json!({"object": "list", "data": []}).to_string(),
+            )
+        } else {
+            assert!(
+                request_line.starts_with("POST /v1/chat/completions "),
+                "unexpected request: {request_line}"
+            );
+            assert!(length < 2_000_000, "unexpectedly large mock request");
+            let mut body = vec![0; length];
+            reader.read_exact(&mut body)?;
+            let request: serde_json::Value = serde_json::from_slice(&body).expect("provider JSON");
+            let compacting = request["messages"]
+                .to_string()
+                .contains("CONTEXT CHECKPOINT COMPACTION");
+            requests.lock().unwrap().push(request);
+            let (text, input) = if compacting {
+                (
+                    "Checkpoint: the user requested a brief answer. Continue with the next task.",
+                    300,
+                )
+            } else {
+                *regular_turns += 1;
+                (
+                    "Mock answer.",
+                    if *regular_turns == 1 { 85_000 } else { 500 },
+                )
+            };
+            let chunk = serde_json::json!({
+                "id": "mock-completion", "object": "chat.completion.chunk",
+                "created": 0, "model": "chat",
+                "choices": [{"index": 0, "delta": {"role": "assistant", "content": text}, "finish_reason": null}]
+            });
+            let end = serde_json::json!({
+                "id": "mock-completion", "object": "chat.completion.chunk",
+                "created": 0, "model": "chat",
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": input, "completion_tokens": 100, "total_tokens": input + 100}
+            });
+            (
+                "text/event-stream",
+                format!("data: {chunk}\n\ndata: {end}\n\ndata: [DONE]\n\n"),
+            )
+        };
+        write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())?;
+        stream.flush()
+    }
+
+    fn finish(mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.thread
+            .take()
+            .unwrap()
+            .join()
+            .expect("mock provider thread")
+            .expect("mock provider HTTP handling");
+    }
+}
+
+impl Drop for MockCompactionProvider {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
 
 struct AcpProcess {
     child: Child,
@@ -14,6 +166,13 @@ struct AcpProcess {
 
 impl AcpProcess {
     fn spawn(workspace: &std::path::Path) -> Self {
+        Self::spawn_with_working_directory(workspace, &std::env::current_dir().unwrap())
+    }
+
+    fn spawn_with_working_directory(
+        workspace: &std::path::Path,
+        working_directory: &std::path::Path,
+    ) -> Self {
         let home = tempfile::tempdir().expect("home");
         let config = tempfile::tempdir().expect("config");
         let state = tempfile::tempdir().expect("state");
@@ -33,6 +192,7 @@ impl AcpProcess {
         let mut child = Command::new(env!("CARGO_BIN_EXE_crabcode"))
             .args(["acp", "--cwd"])
             .arg(workspace)
+            .current_dir(working_directory)
             .env("HOME", home.path())
             .env("XDG_CONFIG_HOME", config.path())
             .env("XDG_STATE_HOME", state.path())
@@ -320,6 +480,23 @@ fn session_load_error_keeps_stdio_transport_open() {
 #[test]
 fn advertises_and_dispatches_commands_over_stdio() {
     let workspace = tempfile::tempdir().expect("workspace");
+    // The empty models.dev cache avoids external catalog requests, but session
+    // setup still needs a configured model. These commands never call a provider;
+    // omitting baseURL also avoids custom-provider model discovery requests.
+    std::fs::write(
+        workspace.path().join("crabcode.json"),
+        serde_json::json!({
+            "model": "offline/chat",
+            "enabled_providers": ["offline"],
+            "provider": {"offline": {
+                "npm": "@ai-sdk/openai-compatible",
+                "options": {"apiKey": "dummy"},
+                "models": {"chat": {"limit": {"context": 100000, "output": 1000}}}
+            }}
+        })
+        .to_string(),
+    )
+    .expect("offline workspace config");
     let command_dir = workspace.path().join(".crabcode/commands");
     std::fs::create_dir_all(&command_dir).expect("command dir");
     std::fs::write(
@@ -440,4 +617,132 @@ Wire skill instructions.
     assert_eq!(response["error"]["data"], "Nothing to compact");
 
     process.close_and_wait();
+}
+
+#[test]
+fn automatically_compacts_provider_usage_over_stdio() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let provider = MockCompactionProvider::start();
+    std::fs::write(
+        workspace.path().join("crabcode.json"),
+        serde_json::json!({
+            "model": "mock/chat",
+            "enabled_providers": ["mock"],
+            "provider": {"mock": {
+                "npm": "@ai-sdk/openai-compatible",
+                "options": {"baseURL": format!("http://{}/v1", provider.address), "apiKey": "dummy"},
+                "models": {"chat": {"limit": {"context": 100000, "output": 1000}}}
+            }},
+            "compaction": {"auto": true, "reserved": 20000}
+        }).to_string(),
+    ).expect("workspace config");
+    let system_marker = "ACP_MOCK_WORKSPACE_INSTRUCTIONS_PRESERVED";
+    std::fs::write(workspace.path().join("AGENTS.md"), system_marker).unwrap();
+    // Request-time provider discovery also reads the process working directory.
+    let mut process = AcpProcess::spawn_with_working_directory(workspace.path(), workspace.path());
+    assert!(initialize(&mut process).get("error").is_none());
+    process.send(serde_json::json!({
+        "jsonrpc": "2.0", "id": 2, "method": "session/new",
+        "params": {"cwd": workspace.path(), "mcpServers": []}
+    }));
+    let (response, _) = process.recv_response(2);
+    let session_id = response["result"]["sessionId"]
+        .as_str()
+        .expect("session id");
+    // 3,000 estimated tokens clears the 2,000-token compaction minimum but
+    // cannot reach the 80,000-token threshold without authoritative usage.
+    let initial_prompt = format!(
+        "ARCHIVED_LARGE_INITIAL_PROMPT {}Please answer briefly.",
+        "word ".repeat(2400)
+    );
+    assert!(initial_prompt.len() / 4 >= 2000);
+    assert!(initial_prompt.len() / 4 < 80000);
+    process.send(serde_json::json!({
+        "jsonrpc": "2.0", "id": 3, "method": "session/prompt",
+        "params": {"sessionId": session_id, "prompt": [{"type": "text", "text": initial_prompt}]}
+    }));
+    let (response, notifications) = process.recv_response(3);
+    assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+    let compacted = notifications
+        .iter()
+        .position(|message| {
+            message["params"]["update"]["content"]["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("Context compacted"))
+        })
+        .expect("automatic compaction notification without /compact");
+    let usage = notifications
+        .iter()
+        .filter(|message| message["params"]["update"]["sessionUpdate"] == "usage_update")
+        .collect::<Vec<_>>();
+    assert!(
+        usage
+            .iter()
+            .any(|message| message["params"]["update"]["used"]
+                .as_u64()
+                .is_some_and(|used| used >= 85000)),
+        "provider usage must reach ACP: {usage:?}"
+    );
+    let final_usage = &usage.last().expect("final usage")["params"]["update"];
+    assert_eq!(final_usage["size"], 100000);
+    assert!(
+        final_usage["used"].as_u64().unwrap() < 80000,
+        "{final_usage}"
+    );
+    assert!(notifications[compacted + 1..]
+        .iter()
+        .any(|message| message["params"]["update"]["sessionUpdate"] == "usage_update"));
+    {
+        let requests = provider.requests.lock().unwrap();
+        assert_eq!(
+            requests.len(),
+            2,
+            "one regular request then one summary request"
+        );
+        assert!(
+            requests[0]["messages"].to_string().chars().count() / 4 < 80_000,
+            "estimated initial transcript alone must not trigger compaction"
+        );
+        assert!(!requests[0]["messages"]
+            .to_string()
+            .contains("CONTEXT CHECKPOINT COMPACTION"));
+        assert!(requests[1]["messages"]
+            .to_string()
+            .contains("CONTEXT CHECKPOINT COMPACTION"));
+    }
+    process.send(serde_json::json!({
+        "jsonrpc": "2.0", "id": 4, "method": "session/prompt",
+        "params": {"sessionId": session_id, "prompt": [{"type": "text", "text": "Now give another brief answer."}]}
+    }));
+    let (response, notifications) = process.recv_response(4);
+    assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+    assert!(
+        !notifications
+            .iter()
+            .any(|message| message["params"]["update"]["content"]["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("Context compacted"))),
+        "stale usage must not compact the second turn"
+    );
+    {
+        let requests = provider.requests.lock().unwrap();
+        assert_eq!(requests.len(), 3, "no repeated compaction from stale usage");
+        let messages = requests[2]["messages"]
+            .as_array()
+            .expect("second-turn messages");
+        assert_eq!(messages[0]["role"], "system");
+        assert!(
+            messages[0]["content"].to_string().contains(system_marker),
+            "fresh system prompt preserves workspace instructions"
+        );
+        let text = requests[2]["messages"].to_string();
+        assert!(text.contains("Checkpoint:"), "summary is active context");
+        assert!(
+            !text.contains("ARCHIVED_LARGE_INITIAL_PROMPT"),
+            "archived transcript must not be resent"
+        );
+        assert!(!text.contains("CONTEXT CHECKPOINT COMPACTION"));
+    }
+    process.close_and_wait();
+    provider.finish();
 }
