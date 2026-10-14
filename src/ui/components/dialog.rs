@@ -123,6 +123,8 @@ fn dialog_action_key(hint: &str) -> Option<KeyEvent> {
 #[derive(Debug)]
 pub struct Dialog {
     pub title: String,
+    /// Secondary header text, drawn after `title` in the muted color.
+    pub title_note: String,
     pub items: Vec<DialogItem>,
     pub grouped_items: HashMap<String, Vec<DialogItem>>,
     pub filtered_items: Vec<(String, Vec<DialogItem>)>,
@@ -164,6 +166,7 @@ impl Dialog {
         search_textarea.set_placeholder_text("Search");
         Self {
             title,
+            title_note: String::new(),
             items: Vec::new(),
             grouped_items: HashMap::new(),
             filtered_items: Vec::new(),
@@ -1764,13 +1767,20 @@ impl Dialog {
             ])
             .split(chunks[0]);
 
-        let title_paragraph = Paragraph::new(Line::from(vec![Span::styled(
-            &self.title,
+        let mut title_spans = vec![Span::styled(
+            self.title.clone(),
             Style::default()
                 .fg(colors.text)
                 .add_modifier(Modifier::BOLD),
-        )]))
-        .alignment(ratatui::layout::Alignment::Left);
+        )];
+        if !self.title_note.is_empty() {
+            title_spans.push(Span::styled(
+                format!("  {}", self.title_note),
+                Style::default().fg(colors.text_weak),
+            ));
+        }
+        let title_paragraph =
+            Paragraph::new(Line::from(title_spans)).alignment(ratatui::layout::Alignment::Left);
         frame.render_widget(title_paragraph, header_chunks[0]);
 
         let esc_paragraph = Paragraph::new(Line::from(vec![Span::styled(
@@ -2081,6 +2091,7 @@ impl Clone for Dialog {
     fn clone(&self) -> Self {
         Self {
             title: self.title.clone(),
+            title_note: self.title_note.clone(),
             items: self.items.clone(),
             grouped_items: self.grouped_items.clone(),
             filtered_items: self.filtered_items.clone(),

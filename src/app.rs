@@ -5426,64 +5426,7 @@ impl App {
                 let Some(popup) = self.file_actions.take() else {
                     return;
                 };
-                if action == FileAction::Copy {
-                    self.copy_text_with_toast(&popup.copy_payload(), "Copied absolute path");
-                    return;
-                }
-                let target = popup.target;
-                if action == FileAction::Reveal {
-                    // push_toast uses the global Mutex<ToastManager>, so the
-                    // worker can report its outcome without borrowing the app.
-                    std::thread::spawn(move || {
-                        match crate::utils::file_opener::reveal_file_path(&target.path) {
-                            Ok(()) => push_toast(Toast::new(
-                                format!("Revealed {}", target.path.display()),
-                                ToastLevel::Info,
-                                None,
-                            )),
-                            Err(err) => push_toast(Toast::new(
-                                format!("File action failed: {err}"),
-                                ToastLevel::Error,
-                                None,
-                            )),
-                        }
-                    });
-                    return;
-                }
-                let result = match action {
-                    FileAction::Open => {
-                        let result = if let Some(line) = target.line {
-                            crate::utils::file_opener::open_file_path_at_location(
-                                &target.path,
-                                line,
-                                target.column.unwrap_or(1),
-                                &self.editor,
-                            )
-                        } else {
-                            crate::utils::file_opener::open_file_path(&target.path, &self.editor)
-                        };
-                        result.map(|outcome| {
-                            if let crate::utils::file_opener::OpenOutcome::Suspend(command) =
-                                outcome
-                            {
-                                self.pending_editor_suspend = Some(command);
-                            }
-                        })
-                    }
-                    FileAction::Reveal | FileAction::Copy => unreachable!(),
-                };
-                match result {
-                    Ok(()) => push_toast(Toast::new(
-                        format!("Opened {}", target.path.display()),
-                        ToastLevel::Info,
-                        None,
-                    )),
-                    Err(err) => push_toast(Toast::new(
-                        format!("File action failed: {err}"),
-                        ToastLevel::Error,
-                        None,
-                    )),
-                }
+                self.perform_file_action(action, popup.target);
             }
         }
     }
@@ -5633,7 +5576,9 @@ impl App {
             OverlayFocus::SessionsDialog if self.sessions_dialog_state.item_menu.is_none() => {
                 Some(&self.sessions_dialog_state.dialog)
             }
-            OverlayFocus::SkillsDialog => Some(&self.skills_dialog_state.dialog),
+            OverlayFocus::SkillsDialog if !self.skills_dialog_state.info_is_open() => {
+                Some(&self.skills_dialog_state.dialog)
+            }
             OverlayFocus::McpDialog => Some(&self.mcp_dialog_state.dialog),
             OverlayFocus::TimelineDialog => Some(&self.timeline_dialog_state.dialog),
             OverlayFocus::CommandPalette => Some(&self.command_palette_state.dialog),
@@ -6400,7 +6345,7 @@ impl App {
                         .join(""),
                 );
             }
-            (_, OverlayFocus::SkillsDialog) => {
+            (_, OverlayFocus::SkillsDialog) if !self.skills_dialog_state.info_is_open() => {
                 self.skills_dialog_state
                     .dialog
                     .search_textarea
@@ -9293,13 +9238,91 @@ impl App {
         self.overlay_focus = OverlayFocus::SkillsDialog;
     }
 
+    fn perform_file_action(&mut self, action: FileAction, target: FileHyperlinkTarget) {
+        if action == FileAction::Copy {
+            match crate::utils::file_opener::absolute_file_path(&target.path) {
+                Ok(path) => {
+                    self.copy_text_with_toast(&path.to_string_lossy(), "Copied absolute path")
+                }
+                Err(err) => push_toast(Toast::new(
+                    format!("Failed to resolve file: {err}"),
+                    ToastLevel::Error,
+                    None,
+                )),
+            }
+            return;
+        }
+        if action == FileAction::Reveal {
+            // push_toast uses the global Mutex<ToastManager>, so the
+            // worker can report its outcome without borrowing the app.
+            std::thread::spawn(move || {
+                match crate::utils::file_opener::reveal_file_path(&target.path) {
+                    Ok(()) => push_toast(Toast::new(
+                        format!("Revealed {}", target.path.display()),
+                        ToastLevel::Info,
+                        None,
+                    )),
+                    Err(err) => push_toast(Toast::new(
+                        format!("File action failed: {err}"),
+                        ToastLevel::Error,
+                        None,
+                    )),
+                }
+            });
+            return;
+        }
+        let result = if let Some(line) = target.line {
+            crate::utils::file_opener::open_file_path_at_location(
+                &target.path,
+                line,
+                target.column.unwrap_or(1),
+                &self.editor,
+            )
+        } else {
+            crate::utils::file_opener::open_file_path(&target.path, &self.editor)
+        };
+        let result = result.map(|outcome| {
+            if let crate::utils::file_opener::OpenOutcome::Suspend(command) = outcome {
+                self.pending_editor_suspend = Some(command);
+            }
+        });
+        match result {
+            Ok(()) => push_toast(Toast::new(
+                format!("Opened {}", target.path.display()),
+                ToastLevel::Info,
+                None,
+            )),
+            Err(err) => push_toast(Toast::new(
+                format!("File action failed: {err}"),
+                ToastLevel::Error,
+                None,
+            )),
+        }
+    }
+
     fn handle_skills_dialog_action(
         &mut self,
         action: crate::views::skills_dialog::SkillsDialogAction,
     ) {
-        let crate::views::skills_dialog::SkillsDialogAction::Toggle { skill_id } = action else {
-            return;
-        };
+        use crate::views::skills_dialog::SkillsDialogAction;
+        match action {
+            SkillsDialogAction::None => {}
+            SkillsDialogAction::InsertMention { name } => {
+                self.input.insert_str(&format!("@{name}"));
+            }
+            SkillsDialogAction::File { action, path } => self.perform_file_action(
+                action,
+                FileHyperlinkTarget {
+                    path,
+                    line: None,
+                    column: None,
+                },
+            ),
+            SkillsDialogAction::Toggle { skill_id } => self.toggle_skill(&skill_id),
+        }
+    }
+
+    fn toggle_skill(&mut self, skill_id: &str) {
         let result = (|| -> anyhow::Result<()> {
             let store = crate::skill::get_skill_store()
                 .ok_or_else(|| anyhow::anyhow!("Skill store not initialized"))?;
@@ -18192,6 +18215,73 @@ mod tests {
                 InputType::AgentMention(_)
             ));
         }
+    }
+
+    #[test]
+    fn enter_on_a_skill_inserts_the_mention_at_the_cursor() {
+        let mut app = test_app();
+        app.input.set_text("xy");
+        assert!(app
+            .input
+            .handle_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)));
+        app.skills_dialog_state = crate::views::skills_dialog::init_skills_dialog(
+            "Skills",
+            vec![crate::ui::components::dialog::DialogItem {
+                id: "computer-use".to_string(),
+                name: "computer-use".to_string(),
+                group: "Skills".to_string(),
+                description: String::new(),
+                tip: None,
+                provider_id: String::new(),
+                active: true,
+            }],
+        );
+        app.skills_dialog_state.dialog.show();
+        app.overlay_focus = OverlayFocus::SkillsDialog;
+        app.handle_keys(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.input.get_text(), "x@computer-usey");
+        assert_eq!(app.overlay_focus, OverlayFocus::None);
+    }
+
+    #[test]
+    fn skill_source_open_uses_the_configured_editor() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("SKILL.md");
+        std::fs::write(&path, "# skill\n").unwrap();
+        let store = crate::skill::SkillStore::for_test([crate::skill::SkillInfo {
+            name: "alpha".to_string(),
+            description: None,
+            location: path.clone(),
+            content: String::new(),
+        }]);
+        let mut app = test_app();
+        app.editor.open = Some("ed {pathname}".to_string());
+        app.editor.suspend = true;
+        app.skills_dialog_state = crate::views::skills_dialog::init_skills_dialog("Skills", vec![]);
+        app.skills_dialog_state.refresh(&store);
+        app.skills_dialog_state.dialog.show();
+        app.overlay_focus = OverlayFocus::SkillsDialog;
+
+        app.handle_keys(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::CONTROL));
+        assert!(app.skills_dialog_state.info_is_open());
+        assert_eq!(app.input.get_text(), "");
+
+        app.handle_keys(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+        let expected =
+            crate::utils::file_opener::expand_editor_open_command("ed {pathname}", &path, 1, 1)
+                .unwrap();
+        assert_eq!(app.take_editor_suspend(), Some(expected));
+        assert!(app.skills_dialog_state.info_is_open());
+        assert_eq!(app.overlay_focus, OverlayFocus::SkillsDialog);
+        assert_eq!(app.skills_dialog_state.dialog.title, "Skills");
+        assert!(
+            app.skills_dialog_state
+                .dialog
+                .title_note
+                .starts_with("1  ~"),
+            "{}",
+            app.skills_dialog_state.dialog.title_note
+        );
     }
 
     #[test]
