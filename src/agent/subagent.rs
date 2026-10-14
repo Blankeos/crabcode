@@ -822,9 +822,7 @@ mod tests {
             assert!(system
                 .content
                 .contains("<description>Use test-workflow for focused testing.</description>"));
-            assert!(system
-                .content
-                .contains("<location>file:///skills/test-workflow/SKILL.md</location>"));
+            assert!(!system.content.contains(skill.location.to_str().unwrap()));
             assert!(system
                 .content
                 .contains("use the skill tool to load it before responding"));

@@ -406,7 +406,10 @@ mod tests {
             assert_eq!(text_in(&buffer, area), label);
             assert_eq!(area.height, 1);
             let suffix = Rect::new(area.right(), area.y, 35, 1);
-            assert_eq!(text_in(&buffer, suffix), "  shift-tab agents  ctrl+p commands");
+            assert_eq!(
+                text_in(&buffer, suffix),
+                "  shift-tab agents  ctrl+p commands"
+            );
             let colors = crate::theme::Theme::load_builtin_default().get_colors(true);
             assert_eq!(buffer[(area.x, area.y)].fg, colors.warning);
             assert!(buffer[(area.x, area.y)].modifier.contains(Modifier::BOLD));

@@ -1834,17 +1834,27 @@ impl Input {
         }
     }
 
-    fn configured_agent_names(&self) -> Vec<String> {
-        self.autocomplete
-            .as_ref()
-            .map(|autocomplete| {
-                autocomplete
-                    .agents
-                    .iter()
-                    .map(|agent| agent.name.clone())
-                    .collect()
-            })
-            .unwrap_or_default()
+    /// Agent names, then skill names that don't collide with an agent.
+    /// Collisions keep the agent so `@explore` stays an agent mention.
+    fn configured_mention_names(&self) -> Vec<String> {
+        let Some(autocomplete) = &self.autocomplete else {
+            return Vec::new();
+        };
+        let mut names: Vec<String> = autocomplete
+            .agents
+            .iter()
+            .map(|agent| agent.name.clone())
+            .collect();
+        for skill in &autocomplete.skills {
+            if names
+                .iter()
+                .any(|name| name.eq_ignore_ascii_case(&skill.name))
+            {
+                continue;
+            }
+            names.push(skill.name.clone());
+        }
+        names
     }
 
     fn style_agent_mention_ranges(
@@ -1858,7 +1868,7 @@ impl Input {
             return;
         }
 
-        let agent_names = self.configured_agent_names();
+        let agent_names = self.configured_mention_names();
         if agent_names.is_empty() {
             return;
         }
@@ -3674,6 +3684,55 @@ mod tests {
         assert_eq!(
             buffer.cell(general_pos).expect("general cell").style().fg,
             Some(colors.success)
+        );
+    }
+
+    #[test]
+    fn test_skill_mentions_render_with_the_same_mention_colors_as_agents() {
+        use crate::autocomplete::{AutoComplete, CommandAuto, Suggestion};
+        use crate::command::registry::Registry;
+        use crate::theme::agent_color;
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let mut input = Input::new();
+        input.autocomplete = Some(
+            AutoComplete::new(CommandAuto::new(&Registry::new()))
+                .with_agents(vec![Suggestion::agent("explore", "Explore agent")])
+                .with_skills(vec![
+                    Suggestion::skill("explore", "Name collision stays an agent"),
+                    Suggestion::skill("codebase-design", "Design deep modules"),
+                ]),
+        );
+        input.insert_str("@explore and @codebase-design");
+
+        let colors = test_colors();
+        let mut terminal = Terminal::new(TestBackend::new(48, 6)).unwrap();
+        terminal
+            .draw(|frame| {
+                input.render(
+                    frame,
+                    Rect::new(0, 0, 48, 6),
+                    "Plan",
+                    "model",
+                    "provider",
+                    None,
+                    false,
+                    &colors,
+                    true,
+                );
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let explore_pos = find_buffer_text(buffer, 48, 6, "@explore").expect("explore mention");
+        let skill_pos = find_buffer_text(buffer, 48, 6, "@codebase-design").expect("skill mention");
+        assert_eq!(
+            buffer.cell(explore_pos).expect("explore cell").style().fg,
+            Some(colors.warning)
+        );
+        assert_eq!(
+            buffer.cell(skill_pos).expect("skill cell").style().fg,
+            Some(agent_color("codebase-design", &colors))
         );
     }
 

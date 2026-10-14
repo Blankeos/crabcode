@@ -14,10 +14,9 @@ pub(crate) fn render_skill_guidance<'a>(
         .into_iter()
         .map(|skill| {
             format!(
-                "  <skill>\n    <name>{}</name>\n    <description>{}</description>\n    <location>file://{}</location>\n  </skill>",
+                "  <skill>\n    <name>{}</name>\n    <description>{}</description>\n  </skill>",
                 skill.name,
-                skill.description.as_deref().unwrap_or(""),
-                skill.location.display()
+                skill.description.as_deref().unwrap_or("")
             )
         })
         .collect::<Vec<_>>()
@@ -27,6 +26,17 @@ pub(crate) fn render_skill_guidance<'a>(
     }
 
     format!("{SKILL_GUIDANCE_PREFIX}{skills_xml}\n</available_skills>")
+}
+
+/// Tokens the enabled catalog adds to every prompt.
+///
+/// Matches the current OpenCode catalog: name and description only. Paths and
+/// skill bodies stay out; the skill tool loads a body by name. The count is
+/// the rendered block at ~4 characters per token, not a provider tokenizer.
+pub(crate) fn estimate_skill_catalog_tokens<'a>(
+    skills: impl IntoIterator<Item = &'a crate::skill::SkillInfo>,
+) -> usize {
+    render_skill_guidance(skills).chars().count().div_ceil(4)
 }
 
 /// Refresh only our generated catalog in a restored system prompt. Do not
@@ -491,8 +501,17 @@ mod tests {
         assert_eq!(guidance.matches("<available_skills>").count(), 1);
         assert!(guidance.contains("<name>test-skill</name>"));
         assert!(guidance.contains("<description></description>"));
-        assert!(guidance.contains("file:///skills/test-skill/SKILL.md"));
+        assert!(!guidance.contains("<location>"));
+        assert!(!guidance.contains(skill.location.to_str().unwrap()));
+        assert!(!guidance.contains("file://"));
         assert!(!guidance.contains(&skill.content));
+        assert_eq!(estimate_skill_catalog_tokens([]), 0);
+        let mut with_body = skill.clone();
+        with_body.content = "x".repeat(10_000);
+        assert_eq!(
+            estimate_skill_catalog_tokens([&skill]),
+            estimate_skill_catalog_tokens([&with_body])
+        );
     }
 
     #[test]
