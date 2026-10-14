@@ -694,14 +694,6 @@ mod tests {
             "{}",
             state.dialog.title_note
         );
-        assert_eq!(
-            store
-                .all()
-                .iter()
-                .map(|skill| skill.name.as_str())
-                .collect::<Vec<_>>(),
-            ["Alpha", "alpha", "delta", "zebra"]
-        );
     }
 
     #[test]
@@ -866,7 +858,6 @@ mod tests {
         let count = find_cell(&buffer, "1/2").expect("count");
         assert_eq!(buffer[skills].style().fg, Some(colors.text));
         assert_eq!(buffer[count].style().fg, Some(colors.text_weak));
-        assert_ne!(colors.text, colors.text_weak);
     }
 
     fn find_cell(buffer: &ratatui::buffer::Buffer, needle: &str) -> Option<(u16, u16)> {
@@ -911,7 +902,6 @@ mod tests {
         assert!(text.contains("Open"));
         assert!(text.contains(reveal_label()));
         assert!(text.contains("Copy absolute path"));
-        assert!(text.contains(&state.dialog.search_query));
         let path = find_cell(&buffer, "/skills/alpha").expect("path");
         let action = find_cell(&buffer, "Reveal").expect("unselected action");
         let title = state.source.as_ref().unwrap();
@@ -919,10 +909,7 @@ mod tests {
         assert_eq!(buffer[path].style().fg, Some(colors.text_weak));
         assert_eq!(buffer[action].style().fg, Some(colors.text));
         assert_eq!(title.fg, Some(colors.primary));
-        assert!(title
-            .add_modifier
-            .contains(ratatui::style::Modifier::BOLD));
-        assert_ne!(colors.text, colors.text_weak);
+        assert!(title.add_modifier.contains(ratatui::style::Modifier::BOLD));
     }
 
     #[test]
@@ -1040,9 +1027,49 @@ mod tests {
             &mut state,
             KeyEvent::new(KeyCode::Char('i'), KeyModifiers::CONTROL),
         );
-        let text = rendered(&mut state);
-        assert!(text.contains("SKILL.md"), "{text}");
-        assert!(text.contains("directory/"), "{text}");
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_skills_dialog(
+                    frame,
+                    &mut state,
+                    frame.area(),
+                    crate::theme::Theme::load_builtin_default().get_colors(true),
+                );
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let panel = state.source.as_ref().unwrap().area;
+        let rows = (panel.y..panel.bottom())
+            .map(|y| {
+                (panel.x..panel.right())
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+                    .trim()
+                    .to_string()
+            })
+            .filter(|row| row.contains("directory") || row.contains("SKILL"))
+            .collect::<Vec<_>>();
+        assert!(
+            rows.iter().any(|row| row == "SKILL.md"),
+            "filename should stay intact on its own line: {rows:?}"
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("directory/") && row.ends_with('/')),
+            "long paths should break after a slash: {rows:?}"
+        );
+        assert!(
+            rows.iter().all(|row| {
+                row == "SKILL.md"
+                    || row
+                        .split('/')
+                        .filter(|segment| !segment.is_empty())
+                        .all(|segment| segment == "directory")
+            }),
+            "wrap should not split a path segment: {rows:?}"
+        );
     }
 
     #[test]

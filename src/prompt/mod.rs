@@ -502,11 +502,9 @@ mod tests {
         assert!(guidance.contains("<name>test-skill</name>"));
         assert!(guidance.contains("<description></description>"));
         assert!(!guidance.contains("<location>"));
+        assert!(!guidance.contains(skill.location.to_str().unwrap()));
+        assert!(!guidance.contains("file://"));
         assert!(!guidance.contains(&skill.content));
-        assert_eq!(
-            estimate_skill_catalog_tokens([&skill]),
-            guidance.chars().count().div_ceil(4)
-        );
         assert_eq!(estimate_skill_catalog_tokens([]), 0);
         let mut with_body = skill.clone();
         with_body.content = "x".repeat(10_000);

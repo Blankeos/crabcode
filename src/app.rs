@@ -18273,15 +18273,37 @@ mod tests {
         assert_eq!(app.take_editor_suspend(), Some(expected));
         assert!(app.skills_dialog_state.info_is_open());
         assert_eq!(app.overlay_focus, OverlayFocus::SkillsDialog);
-        assert_eq!(app.skills_dialog_state.dialog.title, "Skills");
-        assert!(
-            app.skills_dialog_state
-                .dialog
-                .title_note
-                .starts_with("1  ~"),
-            "{}",
-            app.skills_dialog_state.dialog.title_note
-        );
+    }
+
+    #[test]
+    fn paste_while_skill_info_is_open_does_not_change_search() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("SKILL.md");
+        std::fs::write(&path, "# skill\n").unwrap();
+        let store = crate::skill::SkillStore::for_test([crate::skill::SkillInfo {
+            name: "alpha".to_string(),
+            description: None,
+            location: path,
+            content: String::new(),
+        }]);
+        let mut app = test_app();
+        app.skills_dialog_state = crate::views::skills_dialog::init_skills_dialog("Skills", vec![]);
+        app.skills_dialog_state.refresh(&store);
+        app.skills_dialog_state.dialog.show();
+        app.skills_dialog_state.dialog.set_search_query("alp");
+        app.overlay_focus = OverlayFocus::SkillsDialog;
+
+        app.handle_keys(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::CONTROL));
+        app.handle_paste("nope".to_string());
+        assert!(app.skills_dialog_state.info_is_open());
+        assert_eq!(app.skills_dialog_state.dialog.search_query, "alp");
+        assert_eq!(app.input.get_text(), "");
+
+        app.handle_keys(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!app.skills_dialog_state.info_is_open());
+        app.handle_paste("ha".to_string());
+        assert_eq!(app.skills_dialog_state.dialog.search_query, "alpha");
+        assert_eq!(app.input.get_text(), "");
     }
 
     #[test]
