@@ -996,6 +996,8 @@ pub struct App {
     terminal_focused: bool,
     pub tool_permissions: crate::tools::ToolPermissions,
     pub skills_dirs: Vec<std::path::PathBuf>,
+    pub plugin_specs: Vec<crate::config::configuration::PluginSpec>,
+    pub project_root: std::path::PathBuf,
     pub is_streaming: bool,
     pending_session_title: Option<String>,
     session_view_states: std::collections::HashMap<String, ClientSessionState>,
@@ -1245,6 +1247,8 @@ impl App {
             tool_permissions: crate::tools::ToolPermissions::new(cwd_path.clone())
                 .dangerously_skip_permissions(runtime_options.dangerously_skip_permissions),
             skills_dirs: Vec::new(),
+            plugin_specs: Vec::new(),
+            project_root: std::path::PathBuf::from("."),
             is_streaming: false,
             pending_session_title: None,
             session_view_states: std::collections::HashMap::new(),
@@ -1301,6 +1305,8 @@ impl App {
         };
 
         let loaded_config = crate::config::ConfigLoader::load()?;
+        let plugin_specs = loaded_config.merged_config.plugins.clone();
+        let project_root = loaded_config.project_root.clone();
         let mut mcp_config = loaded_config.merged_config.mcp.clone();
         crate::remote_mcp::apply_mcp_overrides(&mut mcp_config, prefs_dao.as_ref());
         let warm_cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
@@ -1472,6 +1478,8 @@ impl App {
         self.mcp = mcp_config;
         self.config_raw_merged = loaded_config.raw_merged;
         self.skills_dirs = loaded_config.inventory.opencode_skills_dirs;
+        self.plugin_specs = plugin_specs;
+        self.project_root = project_root;
         self.terminal_title_items = terminal_title_items;
         self.startup_hydrated = true;
         self.pending_model_override = None;
@@ -14028,6 +14036,8 @@ mod tests {
             terminal_focused: true,
             tool_permissions: crate::tools::ToolPermissions::new(".".to_string()),
             skills_dirs: Vec::new(),
+            plugin_specs: Vec::new(),
+            project_root: std::path::PathBuf::from("."),
             is_streaming: false,
             pending_session_title: None,
             session_view_states: std::collections::HashMap::new(),
