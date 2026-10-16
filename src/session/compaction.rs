@@ -546,22 +546,20 @@ fn message_parts_context_tokens(message: &Message) -> usize {
     }
 
     match message.role {
-        MessageRole::Assistant => assistant_parts_context_tokens(message),
+        MessageRole::Assistant => assistant_parts_context_tokens(&message.parts),
         MessageRole::Tool => estimate_tokens(&tool_content_for_prompt(&message.content)),
         _ => estimate_tokens(&message.content),
     }
 }
 
-fn assistant_parts_context_tokens(message: &Message) -> usize {
-    let tool_call_ids = message
-        .parts
+pub(crate) fn assistant_parts_context_tokens(parts: &[MessagePart]) -> usize {
+    let tool_call_ids = parts
         .iter()
         .filter(|part| part.part_type == "tool_call")
         .filter_map(|part| part.tool_id().map(|id| id.to_string()))
         .collect::<std::collections::HashSet<_>>();
 
-    message
-        .parts
+    parts
         .iter()
         .map(|part| match part.part_type.as_str() {
             "text" => part.text_value().map(estimate_tokens).unwrap_or(0),
