@@ -4,9 +4,14 @@ default:
 check-aisdk-boundary:
     bash scripts/check-aisdk-boundary.sh
 
-[doc('Check registry publishing workflow and npm archive compatibility')]
+[doc('Check release publishing and offline shell/npm installer behavior')]
 test-release:
-    bun test scripts/release-workflow.test.ts npm/install.test.js
+    bun test --timeout 30000 scripts/release-workflow.test.ts scripts/install-ui.test.ts npm/install.test.js
+
+[doc('Check the compiled upgrade CLI, install routing, and terminal rendering offline')]
+test-upgrade-ui:
+    cargo build --bin crabcode
+    bun test --timeout 30000 scripts/upgrade-ui.test.ts
 
 dev:
     cargo r
