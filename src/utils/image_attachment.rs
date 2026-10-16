@@ -266,7 +266,7 @@ pub fn paste_image_to_temp_png() -> Result<PathBuf> {
         .keep()
         .context("failed to persist image picker output file")?;
 
-    let status = Command::new("termux-storage-get")
+    let status = std::process::Command::new("termux-storage-get")
         .arg(&path)
         .status()
         .context(
