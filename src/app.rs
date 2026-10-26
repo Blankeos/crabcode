@@ -263,6 +263,7 @@ enum ConnectDialogMode {
     ProviderSelection,
     OpenAIMethodSelection,
     XAIMethodSelection,
+    GoogleMethodSelection,
 }
 
 #[derive(Debug)]
@@ -291,6 +292,7 @@ enum McpOAuthTaskMessage {
 enum OAuthProvider {
     OpenAI,
     XAI,
+    Google,
 }
 
 impl OAuthProvider {
@@ -298,6 +300,7 @@ impl OAuthProvider {
         match self {
             Self::OpenAI => "openai",
             Self::XAI => "xai",
+            Self::Google => "google",
         }
     }
 
@@ -305,6 +308,7 @@ impl OAuthProvider {
         match self {
             Self::OpenAI => "OpenAI",
             Self::XAI => "xAI",
+            Self::Google => "Google Antigravity",
         }
     }
 
@@ -312,6 +316,7 @@ impl OAuthProvider {
         match self {
             Self::OpenAI => "Connected OpenAI via ChatGPT Plus/Pro OAuth",
             Self::XAI => "Connected xAI via Grok OAuth",
+            Self::Google => "Connected Gemini via Google Antigravity OAuth",
         }
     }
 
@@ -319,6 +324,7 @@ impl OAuthProvider {
         match self {
             Self::OpenAI => "gpt-5.4",
             Self::XAI => "grok-build-0.1",
+            Self::Google => "gemini-3-flash",
         }
     }
 }
@@ -933,6 +939,8 @@ pub struct App {
     pub api_key_input: crate::ui::components::api_key_input::ApiKeyInput,
     provider_oauth_receiver: Option<tokio::sync::mpsc::UnboundedReceiver<ProviderOAuthTaskMessage>>,
     provider_oauth_in_progress: Option<OAuthProvider>,
+    google_browser_authorization: Option<crate::auth::antigravity_oauth::BrowserAuthorization>,
+    google_oauth_task: Option<tokio::task::JoinHandle<()>>,
     mcp_oauth_receiver: Option<tokio::sync::mpsc::UnboundedReceiver<McpOAuthTaskMessage>>,
     mcp_oauth_in_progress: Option<String>,
     compaction_receiver: Option<tokio::sync::mpsc::UnboundedReceiver<CompactionTaskMessage>>,
@@ -1193,6 +1201,8 @@ impl App {
             api_key_input,
             provider_oauth_receiver: None,
             provider_oauth_in_progress: None,
+            google_browser_authorization: None,
+            google_oauth_task: None,
             mcp_oauth_receiver: None,
             mcp_oauth_in_progress: None,
             compaction_receiver: None,
@@ -4208,6 +4218,18 @@ impl App {
                         self.overlay_focus = OverlayFocus::None;
                         true
                     }
+                    ProviderOAuthFlowAction::OpenLink(url) => {
+                        self.open_oauth_link(&url);
+                        true
+                    }
+                    ProviderOAuthFlowAction::SubmitCallback(url) => {
+                        self.submit_google_oauth_callback(url);
+                        true
+                    }
+                    ProviderOAuthFlowAction::Cancel => {
+                        self.cancel_google_oauth();
+                        true
+                    }
                     ProviderOAuthFlowAction::CopyLink(url) => {
                         match crate::utils::clipboard::copy_text(&url) {
                             Ok(_) => push_toast(Toast::new(
@@ -5762,10 +5784,15 @@ impl App {
                 ProviderOAuthFlowAction::Close => {
                     self.overlay_focus = OverlayFocus::None;
                 }
+                ProviderOAuthFlowAction::OpenLink(url) => self.open_oauth_link(&url),
+                ProviderOAuthFlowAction::SubmitCallback(url) => {
+                    self.submit_google_oauth_callback(url);
+                }
+                ProviderOAuthFlowAction::Cancel => self.cancel_google_oauth(),
                 ProviderOAuthFlowAction::CopyLink(url) => {
                     match crate::utils::clipboard::copy_text(&url) {
                         Ok(_) => push_toast(Toast::new(
-                            "Copied OpenAI login link",
+                            "Copied OAuth login link",
                             ToastLevel::Info,
                             None,
                         )),
@@ -6381,6 +6408,9 @@ impl App {
             }
             (_, OverlayFocus::ApiKeyInput) => {
                 self.api_key_input.text_area.insert_str(&text);
+            }
+            (_, OverlayFocus::ProviderOAuthFlow) => {
+                self.provider_oauth_flow_state.insert_callback(&text);
             }
             (_, OverlayFocus::SuggestionsPopup) => {
                 if self.is_subagent_session_active() {
@@ -9548,6 +9578,129 @@ impl App {
         }
     }
 
+    fn show_google_connect_methods(&mut self) {
+        use crate::ui::components::dialog::DialogItem;
+        let items = vec![
+            DialogItem {
+                id: "google-oauth-browser".into(),
+                name: "Gemini via Antigravity (browser)".into(),
+                group: "Google Antigravity".into(),
+                description: "Authorize in your browser, then paste the callback URL".into(),
+                tip: Some("Unofficial integration; Google account restrictions may apply".into()),
+                provider_id: "google".into(),
+                active: false,
+            },
+            DialogItem {
+                id: "google-api-key".into(),
+                name: "Manually enter API key".into(),
+                group: "Google Antigravity".into(),
+                description: "Use a Google Gemini API key".into(),
+                tip: None,
+                provider_id: "google".into(),
+                active: false,
+            },
+        ];
+        self.connect_dialog_state =
+            crate::views::ConnectDialogState::with_items("Connect Google Antigravity", items);
+        self.connect_dialog_state.dialog.show();
+        self.connect_dialog_mode = ConnectDialogMode::GoogleMethodSelection;
+        self.overlay_focus = OverlayFocus::ConnectDialog;
+    }
+
+    fn open_oauth_link(&self, url: &str) {
+        if crate::utils::file_opener::open_url(url).is_err() {
+            push_toast(Toast::new(
+                "Could not open browser. Press ctrl+y to copy the sign-in link.",
+                ToastLevel::Warning,
+                None,
+            ));
+        }
+    }
+
+    fn begin_google_oauth_browser(&mut self) {
+        self.begin_google_oauth_browser_with(
+            crate::auth::antigravity_oauth::BrowserAuthorization::new,
+        );
+    }
+
+    fn begin_google_oauth_browser_with(
+        &mut self,
+        authorization: impl FnOnce() -> anyhow::Result<
+            crate::auth::antigravity_oauth::BrowserAuthorization,
+        >,
+    ) {
+        if self.provider_oauth_in_progress == Some(OAuthProvider::Google) {
+            // Reopen the pending attempt without replacing its state/verifier.
+            self.provider_oauth_flow_state.visible = true;
+            self.overlay_focus = OverlayFocus::ProviderOAuthFlow;
+            return;
+        }
+        if self.provider_oauth_in_progress.is_some() || self.mcp_oauth_in_progress.is_some() {
+            push_toast(Toast::new(
+                "Another OAuth login is in progress",
+                ToastLevel::Info,
+                None,
+            ));
+            return;
+        }
+        match authorization() {
+            Ok(authorization) => {
+                self.provider_oauth_flow_state.show_browser_callback_for(
+                    OAuthProvider::Google.label(),
+                    authorization.authorization_url(),
+                );
+                self.google_browser_authorization = Some(authorization);
+                self.provider_oauth_in_progress = Some(OAuthProvider::Google);
+                self.connect_dialog_mode = ConnectDialogMode::ProviderSelection;
+                self.connect_dialog_state = init_connect_dialog();
+                self.overlay_focus = OverlayFocus::ProviderOAuthFlow;
+            }
+            Err(error) => push_toast(Toast::new(error.to_string(), ToastLevel::Error, None)),
+        }
+    }
+
+    fn submit_google_oauth_callback(&mut self, callback_url: String) {
+        let Some(authorization) = self.google_browser_authorization.as_ref() else {
+            return;
+        };
+        if let Err(error) = authorization.validate_callback(&callback_url) {
+            self.provider_oauth_flow_state
+                .set_callback_error(error.to_string());
+            return;
+        }
+        let authorization = self
+            .google_browser_authorization
+            .take()
+            .expect("validated pending login");
+        self.provider_oauth_flow_state.mark_submitting();
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        self.provider_oauth_receiver = Some(receiver);
+        self.google_oauth_task = Some(tokio::spawn(async move {
+            let event = match authorization.complete(&callback_url).await {
+                Ok(credentials) => ProviderOAuthTaskMessage::Success {
+                    provider: OAuthProvider::Google,
+                    credentials,
+                },
+                Err(error) => ProviderOAuthTaskMessage::Failed {
+                    provider: OAuthProvider::Google,
+                    error: error.to_string(),
+                },
+            };
+            let _ = sender.send(event);
+        }));
+    }
+
+    fn cancel_google_oauth(&mut self) {
+        self.google_browser_authorization = None;
+        if let Some(task) = self.google_oauth_task.take() {
+            task.abort();
+        }
+        self.provider_oauth_receiver = None;
+        self.provider_oauth_in_progress = None;
+        self.provider_oauth_flow_state.hide();
+        self.overlay_focus = OverlayFocus::None;
+    }
+
     fn show_openai_connect_methods(&mut self) {
         use crate::ui::components::dialog::DialogItem;
 
@@ -9739,6 +9892,11 @@ impl App {
                     return;
                 }
 
+                if selected_item.id == "google" {
+                    self.show_google_connect_methods();
+                    return;
+                }
+
                 self.api_key_input.show(&selected_item.id);
                 self.overlay_focus = OverlayFocus::ApiKeyInput;
             }
@@ -9757,6 +9915,15 @@ impl App {
                 _ => {
                     self.overlay_focus = OverlayFocus::None;
                 }
+            },
+            ConnectDialogMode::GoogleMethodSelection => match selected_item.id.as_str() {
+                "google-oauth-browser" => self.begin_google_oauth_browser(),
+                "google-api-key" => {
+                    self.api_key_input.show("google");
+                    self.connect_dialog_mode = ConnectDialogMode::ProviderSelection;
+                    self.overlay_focus = OverlayFocus::ApiKeyInput;
+                }
+                _ => self.overlay_focus = OverlayFocus::None,
             },
             ConnectDialogMode::XAIMethodSelection => match selected_item.id.as_str() {
                 "xai-oauth-browser" => {
@@ -9844,6 +10011,10 @@ impl App {
     }
 
     fn begin_provider_oauth_browser(&mut self, provider: OAuthProvider) {
+        if provider == OAuthProvider::Google {
+            self.begin_google_oauth_browser();
+            return;
+        }
         if let Some(active_provider) = self.provider_oauth_in_progress {
             push_toast(Toast::new(
                 format!("{} OAuth is already in progress", active_provider.label()),
@@ -9867,6 +10038,7 @@ impl App {
             let result = match provider {
                 OAuthProvider::OpenAI => crate::auth::openai_oauth::authorize_browser().await,
                 OAuthProvider::XAI => crate::auth::xai_oauth::authorize_browser().await,
+                OAuthProvider::Google => unreachable!("Google uses pasted callbacks"),
             };
 
             let _ = match result {
@@ -9912,6 +10084,7 @@ impl App {
                     })
                     .await
                 }
+                OAuthProvider::Google => Err(anyhow::anyhow!("Google uses browser sign-in")),
                 OAuthProvider::XAI => {
                     let code_sender = sender.clone();
                     crate::auth::xai_oauth::authorize_headless(move |code, url| {
@@ -9954,8 +10127,8 @@ impl App {
                     provider,
                     credentials,
                 } => {
-                    if let Ok(auth_dao) = crate::persistence::AuthDAO::new() {
-                        let _ = auth_dao.set_provider(
+                    let saved = crate::persistence::AuthDAO::new().and_then(|auth_dao| {
+                        auth_dao.set_provider(
                             provider.provider_id().to_string(),
                             crate::persistence::AuthConfig::OAuth {
                                 refresh: credentials.refresh,
@@ -9963,8 +10136,26 @@ impl App {
                                 expires: credentials.expires,
                                 account_id: credentials.account_id,
                                 enterprise_url: credentials.enterprise_url,
+                                project_id: credentials.project_id,
                             },
-                        );
+                        )
+                    });
+
+                    self.google_browser_authorization = None;
+                    self.google_oauth_task = None;
+                    if saved.is_err() {
+                        self.provider_oauth_in_progress = None;
+                        self.provider_oauth_receiver = None;
+                        self.provider_oauth_flow_state.hide();
+                        if self.overlay_focus == OverlayFocus::ProviderOAuthFlow {
+                            self.overlay_focus = OverlayFocus::None;
+                        }
+                        push_toast(Toast::new(
+                            "OAuth completed, but credentials could not be saved. Please reconnect.",
+                            ToastLevel::Error,
+                            None,
+                        ));
+                        continue;
                     }
 
                     let default_model = provider.default_model();
@@ -9991,6 +10182,8 @@ impl App {
                     ));
                 }
                 ProviderOAuthTaskMessage::Failed { provider, error } => {
+                    self.google_browser_authorization = None;
+                    self.google_oauth_task = None;
                     self.provider_oauth_in_progress = None;
                     self.provider_oauth_receiver = None;
                     self.provider_oauth_flow_state.hide();
@@ -10888,6 +11081,15 @@ impl App {
                 self.set_session_retry_status(session_id, None);
                 if let Some(chat) = self.chat_for_session_mut(session_id) {
                     chat.append_to_last_assistant(&text);
+                }
+                self.mark_streaming_snapshot_pending(session_id);
+                true
+            }
+            crate::llm::ChunkMessage::ProviderReplay(item) => {
+                if let Some(chat) = self.chat_for_session_mut(session_id) {
+                    if let Some(message) = chat.get_last_assistant_message_mut() {
+                        crate::llm::antigravity::persist_replay(message, item);
+                    }
                 }
                 self.mark_streaming_snapshot_pending(session_id);
                 true
@@ -13553,6 +13755,157 @@ mod tests {
     use crate::tools::{PermissionAction, PermissionPrompt};
     use serde_json::json;
 
+    #[test]
+    fn google_connect_keeps_api_key_and_browser_choices() {
+        let mut app = test_app();
+        app.show_google_connect_methods();
+        assert_eq!(
+            app.connect_dialog_mode,
+            ConnectDialogMode::GoogleMethodSelection
+        );
+        assert!(app
+            .connect_dialog_state
+            .dialog
+            .select_item_by_id("google-api-key"));
+        let item = app
+            .connect_dialog_state
+            .dialog
+            .get_selected()
+            .unwrap()
+            .clone();
+        app.handle_connect_dialog_selection(item);
+        assert_eq!(app.overlay_focus, OverlayFocus::ApiKeyInput);
+        assert_eq!(
+            app.connect_dialog_mode,
+            ConnectDialogMode::ProviderSelection
+        );
+
+        app.show_google_connect_methods();
+        assert!(app
+            .connect_dialog_state
+            .dialog
+            .select_item_by_id("google-oauth-browser"));
+        let item = app
+            .connect_dialog_state
+            .dialog
+            .get_selected()
+            .unwrap()
+            .clone();
+        assert_eq!(item.id, "google-oauth-browser");
+        app.begin_google_oauth_browser_with(|| {
+            Ok(crate::auth::antigravity_oauth::BrowserAuthorization::for_test())
+        });
+        assert_eq!(app.overlay_focus, OverlayFocus::ProviderOAuthFlow);
+        assert_eq!(app.provider_oauth_in_progress, Some(OAuthProvider::Google));
+        assert!(app
+            .provider_oauth_flow_state
+            .url
+            .as_deref()
+            .unwrap()
+            .starts_with("https://accounts.google.com/"));
+        let url = app.provider_oauth_flow_state.url.clone();
+        app.begin_google_oauth_browser_with(|| {
+            Ok(crate::auth::antigravity_oauth::BrowserAuthorization::for_test())
+        });
+        assert_eq!(app.provider_oauth_flow_state.url, url);
+        app.cancel_google_oauth();
+    }
+
+    #[test]
+    fn antigravity_stream_preserves_hidden_signed_history() {
+        let mut app = test_app();
+        let session_id = app.create_new_session(Some("Signed history".into()));
+        app.chat_state
+            .chat
+            .add_message(crate::session::types::Message::incomplete("answer"));
+        let payload = format!(
+            "{}{}",
+            crate::llm::antigravity::REPLAY_PREFIX,
+            json!({"parts":[{"text":"answer","thoughtSignature":"signature"}],"call_ids":[]})
+        );
+        app.process_streaming_chunk_for_session(
+            &session_id,
+            crate::llm::ChunkMessage::ProviderReplay(crate::aisdk::chunk::ReasoningReplayItem {
+                id: Some("signed-step".into()),
+                summary: String::new(),
+                encrypted_content: Some(payload),
+            }),
+        );
+        let message = app.chat_state.chat.messages.last().unwrap();
+        assert_eq!(message.content, "answer");
+        assert_eq!(message.parts[0].part_type, "provider_replay");
+        assert_eq!(message.parts[0].data["id"], "signed-step");
+    }
+
+    #[test]
+    fn google_callback_paste_can_be_corrected_and_cancelled_without_chat_leak() {
+        let mut app = test_app();
+        app.input.set_text("existing draft");
+        app.begin_google_oauth_browser_with(|| {
+            Ok(crate::auth::antigravity_oauth::BrowserAuthorization::for_test())
+        });
+        app.handle_paste("http://localhost:51121/oauth-callback?code=private&state=wrong".into());
+        let action = handle_provider_oauth_flow_key_event(
+            &mut app.provider_oauth_flow_state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        let ProviderOAuthFlowAction::SubmitCallback(callback) = action else {
+            panic!("paste should be submitted only by Enter");
+        };
+        app.submit_google_oauth_callback(callback);
+        assert!(app.provider_oauth_flow_state.callback_error.is_some());
+        assert!(!app.provider_oauth_flow_state.submitting);
+        assert!(app.google_browser_authorization.is_some());
+        assert!(app.google_oauth_task.is_none());
+        assert_eq!(app.input.get_text(), "existing draft");
+
+        app.handle_keys(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.overlay_focus, OverlayFocus::None);
+        assert!(app.google_browser_authorization.is_none());
+        assert!(app.provider_oauth_in_progress.is_none());
+        assert!(app.provider_oauth_flow_state.url.is_none());
+    }
+
+    #[test]
+    fn google_missing_client_configuration_leaves_auth_state_unchanged() {
+        let mut app = test_app();
+        app.show_google_connect_methods();
+        app.begin_google_oauth_browser_with(|| {
+            Err(anyhow::anyhow!(
+                "Set CRABCODE_ANTIGRAVITY_CLIENT_ID before connecting Google Antigravity"
+            ))
+        });
+        assert_eq!(app.overlay_focus, OverlayFocus::ConnectDialog);
+        assert!(app.google_browser_authorization.is_none());
+        assert!(app.provider_oauth_in_progress.is_none());
+        assert!(!app.provider_oauth_flow_state.visible);
+    }
+
+    #[tokio::test]
+    async fn google_callback_cancel_aborts_task_and_discards_queued_completion() {
+        let mut app = test_app();
+        app.begin_google_oauth_browser_with(|| {
+            Ok(crate::auth::antigravity_oauth::BrowserAuthorization::for_test())
+        });
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        app.provider_oauth_receiver = Some(receiver);
+        sender
+            .send(ProviderOAuthTaskMessage::Failed {
+                provider: OAuthProvider::Google,
+                error: "queued completion".into(),
+            })
+            .unwrap();
+        let task = tokio::spawn(std::future::pending::<()>());
+        let abort = task.abort_handle();
+        app.google_oauth_task = Some(task);
+        app.cancel_google_oauth();
+        tokio::task::yield_now().await;
+        assert!(abort.is_finished());
+        assert!(app.provider_oauth_receiver.is_none());
+        assert!(app.google_oauth_task.is_none());
+        assert!(app.google_browser_authorization.is_none());
+    }
+
     /// Serializes the preview-flag env tests so concurrent cases cannot swap
     /// `CRABCODE_FORCE_UPDATE_NOTICE` / `CRABCODE_NO_UPDATE_CHECK` mid-call.
     fn update_preview_env_lock() -> &'static std::sync::Mutex<()> {
@@ -13977,6 +14330,8 @@ mod tests {
             api_key_input: crate::ui::components::api_key_input::ApiKeyInput::new(),
             provider_oauth_receiver: None,
             provider_oauth_in_progress: None,
+            google_browser_authorization: None,
+            google_oauth_task: None,
             mcp_oauth_receiver: None,
             mcp_oauth_in_progress: None,
             compaction_receiver: None,

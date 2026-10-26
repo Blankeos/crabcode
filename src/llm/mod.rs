@@ -1,3 +1,4 @@
+pub(crate) mod antigravity;
 pub mod client;
 pub(crate) mod opencode;
 pub mod provider;
@@ -13,6 +14,8 @@ use tokio::sync::mpsc;
 pub enum ChunkMessage {
     Text(String),
     Reasoning(String),
+    /// Opaque provider-owned history that must be persisted in stream order.
+    ProviderReplay(crate::aisdk::chunk::ReasoningReplayItem),
     Retry(crate::aisdk::retry::RetryStatus),
     StreamRollback {
         text: String,

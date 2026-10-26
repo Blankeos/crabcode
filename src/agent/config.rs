@@ -15,6 +15,8 @@ pub struct OpenAIRequestOptions {
     /// Sticky prompt-cache routing key (Responses / chat-completions).
     /// Typically the crabcode session id.
     pub prompt_cache_key: Option<String>,
+    /// Google Antigravity OAuth project routing identifier.
+    pub antigravity_project: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,6 +102,7 @@ pub enum ProviderKind {
     OpenAI,
     OpenAICompatible,
     Anthropic,
+    Antigravity,
 }
 
 static LLM_SESSION: OnceLock<RwLock<Option<LlmSessionConfig>>> = OnceLock::new();

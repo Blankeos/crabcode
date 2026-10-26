@@ -1,3 +1,4 @@
+pub mod antigravity_oauth;
 pub mod oauth;
 pub mod openai_oauth;
 pub mod xai_oauth;

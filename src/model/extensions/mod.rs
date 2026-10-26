@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 use crate::model::discovery::{Model, Provider};
 
+pub mod antigravity;
 pub mod commandcode;
 pub mod ollama;
 

@@ -1614,6 +1614,9 @@ impl AcpService {
                             &live_usage,
                         )?;
                     }
+                    crate::llm::ChunkMessage::ProviderReplay(item) => {
+                        crate::llm::antigravity::persist_replay(&mut assistant, item);
+                    }
                     crate::llm::ChunkMessage::Reasoning(text) => {
                         assistant.append_reasoning(&text);
                         send_text(connection, session_id, &message_id, text, true)?;

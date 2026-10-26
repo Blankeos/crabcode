@@ -124,6 +124,7 @@ Read the [configuration docs here](/_docs/config/index.mdx).
 I tried crabcode specifically for these providers:
 
 - [x] **openai** (both API key and OAuth, thank you OpenAI for supporting OSS harnesses!)
+- [x] **Google Antigravity / Gemini** (browser OAuth with a pasted callback URL)
 - [x] **xAI / Grok** (API key and SuperGrok/X Premium OAuth, thank you xAI for openly supporting OSS harnesses: based on [OpenClaw](https://x.ai/news/grok-openclaw), [OpenCode](https://x.ai/news/grok-opencode), [KiloCode](https://x.ai/news/grok-kilocode), [Hermes](https://x.ai/news/grok-hermes))
 - [x] **opencode-zen** and **opencode-go**
 - [x] **nano-gpt**
@@ -143,8 +144,31 @@ I tried crabcode specifically for these providers:
 
 > I might work harder to support these in the future.
 
-- Gemini - It's OAuth + also very unsure. So currently no.
 - Claude Code Subscription - Known to explicitly not like harnesses. So never will, sorry.
+
+### Google Antigravity sign-in
+
+Before starting Crabcode, provide an authorized OAuth application's client
+credentials through `CRABCODE_ANTIGRAVITY_CLIENT_ID` and
+`CRABCODE_ANTIGRAVITY_CLIENT_SECRET`. Both are required at runtime for browser
+sign-in and token refresh. There are no bundled client credentials or build-time
+fallbacks. Keep these values in your local environment or secret manager, not
+in committed configuration or command-line arguments. The application's
+registered redirect URI must be `http://localhost:51121/oauth-callback`.
+
+The project maintainer must arrange an OAuth client authorized for the required
+Google scopes and Antigravity service. An arbitrary Google Cloud OAuth client
+does not guarantee access. Existing refresh tokens are tied to their original
+client; reconnect if you change clients.
+
+Run `/connect`, choose **Google Antigravity**, then **Gemini via Antigravity (browser)**.
+Open the sign-in link, authorize your account, and paste the full
+`http://localhost:51121/oauth-callback?...` URL into the callback input. The
+localhost page may fail to load; copy the address bar URL anyway. Press Enter
+to submit, or Esc to cancel. Credentials are saved and refreshed automatically.
+
+This is an unofficial integration. Google account eligibility, service terms,
+and account restrictions apply. The API-key option remains available.
 
 ## Performance
 

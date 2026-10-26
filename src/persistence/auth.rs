@@ -26,6 +26,8 @@ pub enum AuthConfig {
             skip_serializing_if = "Option::is_none"
         )]
         enterprise_url: Option<String>,
+        #[serde(rename = "projectId", default, skip_serializing_if = "Option::is_none")]
+        project_id: Option<String>,
     },
 }
 
@@ -176,6 +178,26 @@ impl AuthDAO {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn oauth_project_id_round_trip_and_legacy_default() {
+        let legacy = r#"{"type":"oauth","refresh":"r","access":"a","expires":123}"#;
+        let auth: AuthConfig = serde_json::from_str(legacy).unwrap();
+        assert!(matches!(
+            &auth,
+            AuthConfig::OAuth {
+                project_id: None,
+                ..
+            }
+        ));
+        assert!(serde_json::to_value(auth)
+            .unwrap()
+            .get("projectId")
+            .is_none());
+        let value = serde_json::json!({"type":"oauth","refresh":"r","access":"a","expires":123,"projectId":"managed"});
+        let auth: AuthConfig = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(auth).unwrap(), value);
+    }
 
     #[test]
     fn parse_auth_configs_ignores_invalid_provider_entries() {

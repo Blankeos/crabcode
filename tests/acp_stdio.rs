@@ -30,6 +30,12 @@ impl AcpProcess {
             .unwrap(),
         )
         .expect("offline model fixture");
+        // A connected non-runtime fixture prevents implicit Ollama discovery.
+        std::fs::write(
+            state.path().join("crabcode/auth.json"),
+            r#"{"opencode":{"type":"local"}}"#,
+        )
+        .expect("offline auth fixture");
         let mut child = Command::new(env!("CARGO_BIN_EXE_crabcode"))
             .args(["acp", "--cwd"])
             .arg(workspace)
@@ -357,6 +363,10 @@ Wire skill instructions.
         }
     }));
     let (new_session, mut notifications) = process.recv_response(2);
+    assert!(
+        new_session.get("error").is_none(),
+        "session setup: {new_session}"
+    );
     let session_id = new_session["result"]["sessionId"]
         .as_str()
         .expect("session id")

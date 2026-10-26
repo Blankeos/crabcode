@@ -684,8 +684,8 @@ impl Discovery {
         let is_discovered = advertised
             .get(provider_id)
             .is_some_and(|ids| ids.iter().any(|id| id == model_id));
-        // Only this provider/model is materialized; pricing and limit lookups
-        // must not clone the entire catalog on each streamed response.
+        // Materialize only the requested model, except Google needs its source
+        // metadata to resolve the OAuth catalog's wire IDs.
         let mut providers = HashMap::new();
         if let Some(provider) = provider {
             providers.insert(
@@ -697,11 +697,15 @@ impl Discovery {
                     doc: provider.doc.clone(),
                     env: provider.env.clone(),
                     npm: provider.npm.clone(),
-                    models: provider
-                        .models
-                        .get(model_id)
-                        .map(|model| HashMap::from([(model_id.to_string(), model.clone())]))
-                        .unwrap_or_default(),
+                    models: if provider_id == "google" {
+                        provider.models.clone()
+                    } else {
+                        provider
+                            .models
+                            .get(model_id)
+                            .map(|model| HashMap::from([(model_id.to_string(), model.clone())]))
+                            .unwrap_or_default()
+                    },
                 },
             );
         }
@@ -730,6 +734,7 @@ impl Discovery {
             ids.insert(provider_id.to_string(), vec![model_id.to_string()]);
         }
         self.apply_custom_catalog(&mut providers, &ids);
+        crate::model::extensions::antigravity::augment_catalog(&mut providers);
         let mut provider = providers.remove(provider_id)?;
         let model = provider.models.remove(model_id)?;
         Some((provider, model))
@@ -875,10 +880,10 @@ impl Discovery {
 
         let cached_json = fs::read_to_string(cache_path).context("Failed to read cache file")?;
 
-        let entry = Arc::new(
-            serde_json::from_str::<CacheEntry>(&cached_json)
-                .context("Failed to parse cache file")?,
-        );
+        let mut entry = serde_json::from_str::<CacheEntry>(&cached_json)
+            .context("Failed to parse cache file")?;
+        crate::model::extensions::antigravity::rename_provider(&mut entry.data);
+        let entry = Arc::new(entry);
 
         if let Ok(mut cache) = memory_cache().lock() {
             cache.insert(cache_path.clone(), entry.clone());
@@ -922,6 +927,8 @@ impl Discovery {
             schema_version: CACHE_SCHEMA_VERSION,
         };
 
+        let mut entry = entry;
+        crate::model::extensions::antigravity::rename_provider(&mut entry.data);
         let serialized =
             serde_json::to_string_pretty(&entry).context("Failed to serialize cache data")?;
 
@@ -971,7 +978,7 @@ impl Discovery {
                         ("opencode", "OpenCode"),
                         ("anthropic", "Anthropic"),
                         ("openai", "OpenAI"),
-                        ("google", "Google"),
+                        ("google", "Google Antigravity"),
                     ] {
                         providers.insert(
                             id.to_string(),
@@ -998,6 +1005,7 @@ impl Discovery {
         crate::model::extensions::ModelExtensions::augment_runtime_catalog(&mut providers);
         let advertised = self.discover_custom_model_ids().await;
         self.apply_custom_catalog(&mut providers, &advertised);
+        crate::model::extensions::antigravity::augment_catalog(&mut providers);
 
         Ok(providers)
     }
@@ -1010,6 +1018,7 @@ impl Discovery {
         crate::model::extensions::ModelExtensions::augment_runtime_catalog(&mut providers);
         let advertised = self.discover_custom_model_ids().await;
         self.apply_custom_catalog(&mut providers, &advertised);
+        crate::model::extensions::antigravity::augment_catalog(&mut providers);
         Ok(providers)
     }
 
@@ -1148,6 +1157,10 @@ impl Discovery {
         models.retain(|model| self.provider_is_enabled(&model.provider_id));
         let cache_key = (self.get_cache_path().clone(), {
             let mut signature = self.custom_provider_dialog_signature();
+            signature.push(format!(
+                "google-oauth:{}",
+                crate::model::extensions::antigravity::uses_oauth()
+            ));
             signature.extend(self.custom_provider_endpoint_signature());
             if let Some(providers) = &self.custom_providers {
                 for (id, provider) in providers {
@@ -1281,6 +1294,9 @@ impl Discovery {
     }
 
     pub fn get_provider_name(&self, provider_id: &str) -> Option<String> {
+        if provider_id == "google" {
+            return Some(crate::model::extensions::antigravity::PROVIDER_NAME.to_string());
+        }
         if let Some(name) = self
             .custom_providers
             .as_ref()
@@ -2588,6 +2604,43 @@ mod tests {
         assert_eq!(loaded.unwrap().len(), 1);
 
         let _ = fs::remove_file(cache_path);
+    }
+
+    #[test]
+    fn google_label_is_normalized_in_disk_and_synchronous_cache_views() {
+        let mut discovery = Discovery::new().unwrap();
+        discovery.cache_path = unique_test_cache_path("google_label");
+        fs::create_dir_all(discovery.cache_path.parent().unwrap()).unwrap();
+        let provider: Provider = serde_json::from_value(serde_json::json!({
+            "id": "google", "name": "Google", "models": {}
+        }))
+        .unwrap();
+        discovery
+            .save_to_cache(&HashMap::from([("google".to_string(), provider)]))
+            .unwrap();
+        let expected = crate::model::extensions::antigravity::PROVIDER_NAME;
+        assert_eq!(
+            discovery.get_provider_name("google").as_deref(),
+            Some(expected)
+        );
+        assert_eq!(
+            discovery.load_from_cache().unwrap().unwrap()["google"].name,
+            expected
+        );
+        let disk: CacheEntry =
+            serde_json::from_str(&fs::read_to_string(&discovery.cache_path).unwrap()).unwrap();
+        assert_eq!(disk.data["google"].name, expected);
+
+        // Old on-disk caches receive the same label without a network refresh.
+        let mut old = disk;
+        old.data.get_mut("google").unwrap().name = "Google".to_string();
+        fs::write(&discovery.cache_path, serde_json::to_string(&old).unwrap()).unwrap();
+        memory_cache().lock().unwrap().remove(&discovery.cache_path);
+        assert_eq!(
+            discovery.load_cache_entry().unwrap().unwrap().data["google"].name,
+            expected
+        );
+        let _ = fs::remove_file(&discovery.cache_path);
     }
 
     #[test]

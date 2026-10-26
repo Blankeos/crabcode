@@ -97,7 +97,11 @@ pub async fn run_subagent(
     use futures::StreamExt;
     use std::collections::HashMap;
 
-    let mut session = resolve_subagent_session(&agent, parent_session, sender.as_ref()).await?;
+    let mut session = tokio::select! {
+        biased;
+        _ = cancel_token.cancelled() => return Err("Subagent cancelled".to_string()),
+        session = resolve_subagent_session(&agent, parent_session, sender.as_ref()) => session?,
+    };
     // Child cache key on purpose: subagents have a different system prompt and tool set,
     // so parent-prefix reuse would miss (and risk sticky-routing pollution). See
     // SessionAffinity::child_session docs.
@@ -443,6 +447,40 @@ async fn start_subagent_stream(
     );
 
     match session.provider_kind {
+        ProviderKind::Antigravity => {
+            let access = session
+                .api_key
+                .clone()
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| "Missing Google Antigravity OAuth access token".to_string())?;
+            let project = session
+                .openai_options
+                .antigravity_project
+                .clone()
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| "Missing Google Antigravity OAuth project".to_string())?;
+            let provider = crate::llm::antigravity::Antigravity::new(
+                session.base_url.clone(),
+                session.model.clone(),
+                access,
+                project,
+            )
+            .with_stored_credentials();
+            stream_with_tools_options(
+                provider,
+                messages,
+                tools,
+                max_steps,
+                None,
+                headers,
+                cancel_token,
+                StreamWithToolsOptions {
+                    prune_tool_outputs: session.prune_tool_outputs,
+                },
+            )
+            .await
+            .map_err(|e| format!("Stream error: {}", e))
+        }
         ProviderKind::OpenAICompatible => {
             let mut builder = OpenAICompatible::builder()
                 .base_url(&session.base_url)
@@ -1085,6 +1123,29 @@ mod tests {
         assert_eq!(
             session.openai_options.additional_headers.get("originator"),
             Some(&"crabcode".to_string())
+        );
+    }
+
+    #[test]
+    fn inherited_parent_session_preserves_antigravity_routing() {
+        let registry = crate::agent::definition::AgentRegistry::default();
+        let agent = registry.task_target("explore").unwrap();
+        let mut parent = test_session(None);
+        parent.provider_kind = crate::agent::config::ProviderKind::Antigravity;
+        parent.openai_options.antigravity_project = Some("google-project".into());
+        parent.base_url = crate::auth::antigravity_oauth::ANTIGRAVITY_ENDPOINT.into();
+        let session = tokio_test::block_on(resolve_subagent_session(&agent, parent, None)).unwrap();
+        assert_eq!(
+            session.provider_kind,
+            crate::agent::config::ProviderKind::Antigravity
+        );
+        assert_eq!(
+            session.openai_options.antigravity_project.as_deref(),
+            Some("google-project")
+        );
+        assert_eq!(
+            session.base_url,
+            crate::auth::antigravity_oauth::ANTIGRAVITY_ENDPOINT
         );
     }
 

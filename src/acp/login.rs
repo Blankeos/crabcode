@@ -20,9 +20,41 @@ pub async fn run(cwd: Option<PathBuf>) -> Result<()> {
     if !io::stdin().is_terminal() || !io::stderr().is_terminal() {
         bail!("provider login requires an interactive terminal; run crabcode acp --login in a terminal");
     }
+
+    fn open_url(url: &str) -> Result<()> {
+        #[cfg(target_os = "macos")]
+        {
+            std::process::Command::new("open")
+                .arg(url)
+                .spawn()
+                .map(|_| ())
+                .map_err(Into::into)
+        }
+        #[cfg(target_os = "linux")]
+        {
+            std::process::Command::new("xdg-open")
+                .arg(url)
+                .spawn()
+                .map(|_| ())
+                .map_err(Into::into)
+        }
+        #[cfg(target_os = "windows")]
+        {
+            std::process::Command::new("cmd")
+                .args(["/C", "start", "", url])
+                .spawn()
+                .map(|_| ())
+                .map_err(Into::into)
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+        {
+            let _ = url;
+            Ok(())
+        }
+    }
     eprintln!("Connect a provider (no chat will be started).");
     eprintln!(
-        "Provider examples: openai, anthropic, xai, ollama; custom provider IDs are also accepted."
+        "Provider examples: openai, anthropic, xai, google (Google Antigravity), ollama; custom provider IDs are also accepted."
     );
     let provider = prompt("Provider ID (empty to cancel): ")?;
     validate_provider_id(&provider)?;
@@ -61,10 +93,27 @@ pub async fn run(cwd: Option<PathBuf>) -> Result<()> {
     let method = if matches!(provider.as_str(), "openai" | "xai") {
         eprintln!("1: browser OAuth   2: headless/device OAuth   3: API key");
         prompt("Login method (empty to cancel): ")?
+    } else if provider == "google" {
+        eprintln!("1: Google Antigravity browser OAuth   3: API key");
+        prompt("Login method (empty to cancel): ")?
     } else {
         "3".into()
     };
     let credentials = match (provider.as_str(), method.as_str()) {
+        ("google", "1") => {
+            let authorization = crate::auth::antigravity_oauth::BrowserAuthorization::new()?;
+            eprintln!("This unofficial third-party integration uses Antigravity. Google account eligibility, service terms, and account restrictions apply.\nOpen this URL in a browser:\n{}", authorization.authorization_url());
+            let _ = open_url(authorization.authorization_url());
+            eprintln!("The localhost page may be unavailable; copy its complete URL from the address bar anyway.");
+            let callback =
+                read_hidden("Complete callback URL (hidden; Esc to cancel): ", 16 * 1024)?;
+            oauth_config(
+                authorization
+                    .complete(&callback)
+                    .await
+                    .map_err(|_| anyhow::anyhow!("OAuth login failed; retry provider login"))?,
+            )
+        }
         ("openai", "1") => oauth_config(
             crate::auth::openai_oauth::authorize_browser()
                 .await
@@ -137,6 +186,7 @@ fn oauth_config(credentials: crate::auth::OAuthCredentials) -> AuthConfig {
         expires: credentials.expires,
         account_id: credentials.account_id,
         enterprise_url: credentials.enterprise_url,
+        project_id: credentials.project_id,
     }
 }
 
@@ -161,9 +211,13 @@ impl Drop for RawMode {
 }
 
 fn read_api_key() -> Result<String> {
-    eprint!("API key (hidden; Esc to cancel): ");
+    read_hidden("API key (hidden; Esc to cancel): ", 16 * 1024)
+}
+
+fn read_hidden(label: &str, max_bytes: usize) -> Result<String> {
+    eprint!("{label}");
     io::stderr().flush()?;
-    enable_raw_mode().context("failed to hide API key input")?;
+    enable_raw_mode().context("failed to hide credential input")?;
     let guard = RawMode;
     let mut value = String::new();
     loop {
@@ -182,7 +236,12 @@ fn read_api_key() -> Result<String> {
             KeyCode::Backspace => {
                 value.pop();
             }
-            KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => value.push(ch),
+            KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if value.len() + ch.len_utf8() > max_bytes {
+                    bail!("credential input is too long");
+                }
+                value.push(ch);
+            }
             _ => {}
         }
     }
@@ -190,7 +249,7 @@ fn read_api_key() -> Result<String> {
     eprintln!();
     let value = value.trim().to_owned();
     if value.is_empty() {
-        bail!("API key cannot be empty");
+        bail!("credential input cannot be empty");
     }
     Ok(value)
 }
@@ -223,6 +282,7 @@ mod tests {
             expires: 0,
             account_id: None,
             enterprise_url: None,
+            project_id: None,
         });
         assert!(usable_credentials(&auth));
         assert!(!usable_credentials(&AuthConfig::OAuth {
@@ -231,6 +291,7 @@ mod tests {
             expires: 0,
             account_id: None,
             enterprise_url: None,
+            project_id: None,
         }));
     }
 }

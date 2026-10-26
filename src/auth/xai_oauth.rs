@@ -200,6 +200,7 @@ fn credentials_from_token_response(
         expires,
         account_id: None,
         enterprise_url: None,
+        project_id: None,
     })
 }
 

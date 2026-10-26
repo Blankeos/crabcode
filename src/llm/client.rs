@@ -662,14 +662,16 @@ pub async fn stream_llm_with_cancellation(
         messages.len()
     );
     let ui_model = model.clone();
-    let request_config = prepare_request_config(
-        &provider_name,
-        model,
-        reasoning_effort,
-        messages_have_user_audio(&messages),
-        &sender,
-    )
-    .await?;
+    let request_config = tokio::select! {
+        biased;
+        _ = cancel_token.cancelled() => {
+            let _ = sender.send(crate::llm::ChunkMessage::Cancelled);
+            return Ok(());
+        }
+        config = prepare_request_config(
+            &provider_name, model, reasoning_effort, messages_have_user_audio(&messages), &sender,
+        ) => config?,
+    };
     let mut request_config = request_config;
     request_config.prune_tool_outputs = compaction_config.prune();
     let model_mismatch_warning =
@@ -709,6 +711,7 @@ pub async fn stream_llm_with_cancellation(
             ProviderKind::OpenAI => crate::agent::config::ProviderKind::OpenAI,
             ProviderKind::OpenAICompatible => crate::agent::config::ProviderKind::OpenAICompatible,
             ProviderKind::Anthropic => crate::agent::config::ProviderKind::Anthropic,
+            ProviderKind::Antigravity => crate::agent::config::ProviderKind::Antigravity,
         },
         base_url: request_config.base_url.clone(),
         reasoning_effort: request_config.reasoning_effort,
@@ -971,6 +974,7 @@ pub async fn build_subagent_llm_session(
             ProviderKind::OpenAI => crate::agent::config::ProviderKind::OpenAI,
             ProviderKind::OpenAICompatible => crate::agent::config::ProviderKind::OpenAICompatible,
             ProviderKind::Anthropic => crate::agent::config::ProviderKind::Anthropic,
+            ProviderKind::Antigravity => crate::agent::config::ProviderKind::Antigravity,
         },
         base_url: request_config.base_url,
         reasoning_effort: request_config.reasoning_effort,
@@ -1045,14 +1049,15 @@ pub async fn summarize_for_compaction(
     }
 
     let (warning_sender, _warning_receiver) = tokio::sync::mpsc::unbounded_channel();
-    let request_config = prepare_request_config(
-        &provider_name,
-        model,
-        reasoning_effort,
-        false,
-        &warning_sender,
-    )
-    .await?;
+    let request_config = tokio::select! {
+        biased;
+        _ = cancel_token.cancelled() => {
+            return Err(anyhow::anyhow!("Compaction cancelled by user").into());
+        }
+        config = prepare_request_config(
+            &provider_name, model, reasoning_effort, false, &warning_sender,
+        ) => config?,
+    };
     let messages = vec![AisdkMessage::user(prompt)];
     let mut response = stream_provider_request(
         &request_config,
@@ -1394,6 +1399,15 @@ async fn prepare_request_config(
         &mut request_config,
     );
 
+    maybe_apply_google_oauth_overrides(
+        provider_name,
+        &auth_dao,
+        auth_config.as_ref(),
+        &mut request_config,
+        sender,
+    )
+    .await?;
+
     if request_config.api_key.is_none()
         && !crate::model::extensions::ModelExtensions::is_runtime_provider(provider_name)
     {
@@ -1578,6 +1592,7 @@ async fn maybe_apply_openai_oauth_overrides(
         expires,
         account_id,
         enterprise_url,
+        project_id,
     }) = auth_config.cloned()
     else {
         return Ok(());
@@ -1613,6 +1628,7 @@ async fn maybe_apply_openai_oauth_overrides(
                         expires: oauth_expires,
                         account_id: oauth_account_id.clone(),
                         enterprise_url: oauth_enterprise_url.clone(),
+                        project_id: project_id.clone(),
                     },
                 );
             }
@@ -1691,6 +1707,7 @@ async fn maybe_apply_xai_oauth_overrides(
         expires,
         account_id,
         enterprise_url,
+        project_id,
     }) = auth_config.cloned()
     else {
         return;
@@ -1720,6 +1737,7 @@ async fn maybe_apply_xai_oauth_overrides(
                         expires: oauth_expires,
                         account_id: oauth_account_id.clone(),
                         enterprise_url: oauth_enterprise_url.clone(),
+                        project_id: project_id.clone(),
                     },
                 );
             }
@@ -1745,6 +1763,46 @@ async fn maybe_apply_xai_oauth_overrides(
         .extend(overrides.headers);
 
     crate::emit_log!("Configured xAI Grok Build OAuth transport");
+}
+
+async fn maybe_apply_google_oauth_overrides(
+    provider_name: &str,
+    _auth_dao: &crate::persistence::AuthDAO,
+    auth_config: Option<&crate::persistence::AuthConfig>,
+    request_config: &mut ProviderRequestConfig,
+    _sender: &crate::llm::ChunkSender,
+) -> Result<(), DynError> {
+    if !uses_google_oauth(provider_name, auth_config) {
+        return Ok(());
+    }
+    let credentials = crate::auth::antigravity_oauth::load_request_credentials().await?;
+    apply_google_oauth_credentials(request_config, &credentials);
+    Ok(())
+}
+
+fn uses_google_oauth(
+    provider_name: &str,
+    auth_config: Option<&crate::persistence::AuthConfig>,
+) -> bool {
+    provider_name == "google"
+        && matches!(
+            auth_config,
+            Some(crate::persistence::AuthConfig::OAuth { .. })
+        )
+}
+
+fn apply_google_oauth_credentials(
+    request_config: &mut ProviderRequestConfig,
+    credentials: &crate::auth::OAuthCredentials,
+) {
+    request_config.kind = ProviderKind::Antigravity;
+    request_config.base_url = crate::auth::antigravity_oauth::ANTIGRAVITY_ENDPOINT.to_string();
+    request_config.api_key = Some(credentials.access.clone());
+    request_config.openai_options.antigravity_project = credentials.project_id.clone();
+    request_config.openai_options.additional_headers.insert(
+        "User-Agent".to_string(),
+        crate::auth::antigravity_oauth::user_agent().to_string(),
+    );
 }
 
 fn send_warning(sender: &crate::llm::ChunkSender, warning: impl Into<String>) {
@@ -1837,13 +1895,24 @@ fn stamp_build_parent_cached_aux(
     );
 }
 
+fn retain_provider_replay(messages: &mut Vec<AisdkMessage>, kind: ProviderKind) {
+    if kind != ProviderKind::Antigravity {
+        messages.retain(|message| {
+            !matches!(message, AisdkMessage::Reasoning(item) if item
+                .encrypted_content.as_deref().is_some_and(|value| value.starts_with(
+                    crate::llm::antigravity::REPLAY_PREFIX)))
+        });
+    }
+}
+
 async fn stream_provider_request(
     config: &ProviderRequestConfig,
-    messages: Vec<AisdkMessage>,
+    mut messages: Vec<AisdkMessage>,
     tools: Vec<Tool>,
     max_steps: Option<usize>,
     cancel_token: Option<CancellationToken>,
 ) -> Result<StreamTextResponse, DynError> {
+    retain_provider_replay(&mut messages, config.kind);
     let headers = super::opencode::ensure_session_headers(
         &config.provider_name,
         &config.base_url,
@@ -1852,6 +1921,40 @@ async fn stream_provider_request(
         &std::collections::HashMap::new(),
     );
     match config.kind {
+        ProviderKind::Antigravity => {
+            let access = config
+                .api_key
+                .clone()
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| anyhow::anyhow!("Missing Google Antigravity OAuth access token"))?;
+            let project = config
+                .openai_options
+                .antigravity_project
+                .clone()
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| anyhow::anyhow!("Missing Google Antigravity OAuth project"))?;
+            let provider = super::antigravity::Antigravity::new(
+                config.base_url.clone(),
+                config.model_name.clone(),
+                access,
+                project,
+            )
+            .with_stored_credentials();
+            stream_with_tools_options(
+                provider,
+                messages,
+                tools,
+                max_steps,
+                None,
+                headers,
+                cancel_token,
+                StreamWithToolsOptions {
+                    prune_tool_outputs: config.prune_tool_outputs,
+                },
+            )
+            .await
+            .map_err(|e| Box::new(e) as DynError)
+        }
         ProviderKind::OpenAICompatible => {
             let mut builder = OpenAICompatible::builder()
                 .base_url(&config.base_url)
@@ -2143,9 +2246,16 @@ async fn relay_stream_to_sender(
                 crate::emit_log!("[RELAY] Reasoning chunk ({} chars)", reasoning.len());
                 let _ = sender.send(crate::llm::ChunkMessage::Reasoning(reasoning));
             }
-            ChunkType::ReasoningItem(_) => {
+            ChunkType::ReasoningItem(item) => {
                 let elapsed_ms = start_time.elapsed().as_millis();
                 stats.record_chunk("ReasoningItem", elapsed_ms);
+                if item
+                    .encrypted_content
+                    .as_deref()
+                    .is_some_and(|value| value.starts_with(crate::llm::antigravity::REPLAY_PREFIX))
+                {
+                    let _ = sender.send(crate::llm::ChunkMessage::ProviderReplay(item));
+                }
             }
             ChunkType::ToolCall(tool_call) => {
                 let elapsed_ms = start_time.elapsed().as_millis();
@@ -2512,7 +2622,7 @@ fn convert_messages_for_model_with_audio(
                 if msg.parts.iter().any(|part| {
                     matches!(
                         part.part_type.as_str(),
-                        "text" | "reasoning" | "tool_call" | "tool_result"
+                        "text" | "reasoning" | "tool_call" | "tool_result" | "provider_replay"
                     )
                 }) {
                     append_assistant_parts_for_model(
@@ -2553,6 +2663,32 @@ fn append_assistant_parts_for_model(
 
     for part in &msg.parts {
         match part.part_type.as_str() {
+            "provider_replay" => {
+                let Some(obj) = part.data.as_object() else {
+                    continue;
+                };
+                let id = obj
+                    .get("id")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_owned);
+                let summary = obj
+                    .get("summary")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default()
+                    .to_owned();
+                let encrypted_content = obj
+                    .get("encrypted_content")
+                    .or_else(|| obj.get("encryptedContent"))
+                    .and_then(|value| value.as_str())
+                    .map(str::to_owned);
+                if encrypted_content
+                    .as_deref()
+                    .is_some_and(|value| value.starts_with(crate::llm::antigravity::REPLAY_PREFIX))
+                {
+                    pending_tools.flush_complete_pairs(aisdk_messages);
+                    aisdk_messages.push(AisdkMessage::reasoning(id, summary, encrypted_content));
+                }
+            }
             "text" => {
                 pending_tools.flush_complete_pairs(aisdk_messages);
 
@@ -2888,6 +3024,7 @@ enum ProviderKind {
     OpenAI,
     OpenAICompatible,
     Anthropic,
+    Antigravity,
 }
 
 impl ProviderKind {
@@ -2940,6 +3077,185 @@ mod tests {
 
     use crate::persistence::AuthConfig;
     use base64::Engine as _;
+
+    #[test]
+    fn antigravity_signed_history_survives_multiple_steps_and_next_user_turn() {
+        use crate::aisdk::chunk::ReasoningReplayItem;
+        use crate::llm::antigravity::{gemini_messages, persist_replay, REPLAY_PREFIX};
+        use crate::session::types::Message;
+        use serde_json::json;
+
+        let mut assistant = Message::assistant("");
+        let mut signed_parts = Vec::new();
+        for step in 0..2 {
+            let id = format!("call_{step}");
+            let text = format!("step {step}");
+            let parts = json!([
+                {"text":"private", "thought":true,"thoughtSignature":format!("thought_{step}")},
+                {"text":text,"thoughtSignature":format!("text_{step}")},
+                {"functionCall":{"name":"read","args":{"path":step}},"thoughtSignature":format!("call_signature_{step}")}
+            ]);
+            assistant.append(&text);
+            persist_replay(
+                &mut assistant,
+                ReasoningReplayItem {
+                    id: Some(format!("replay_{step}")),
+                    summary: String::new(),
+                    encrypted_content: Some(format!(
+                        "{REPLAY_PREFIX}{}",
+                        json!({"parts":parts,"call_ids":[id]})
+                    )),
+                },
+            );
+            assistant.add_tool_call_part(&id, "read", json!({"path":step}));
+            assistant.add_or_update_tool_result_part(json!({
+                "id":id,"name":"read","args":{"path":step},"status":"ok","output_preview":format!("result {step}")
+            }));
+            signed_parts.push(parts);
+        }
+        assistant.append("done");
+        // The same flattened JSON representation is stored in session snapshots.
+        assistant.parts =
+            serde_json::from_value(serde_json::to_value(&assistant.parts).unwrap()).unwrap();
+        let history = vec![Message::user("start"), assistant, Message::user("continue")];
+        let messages = convert_messages(&history);
+        let (contents, _) = gemini_messages(&messages).unwrap();
+        assert_eq!(contents.len(), 7);
+        for (step, expected) in signed_parts.iter().enumerate() {
+            assert_eq!(&contents[1 + step * 2]["parts"], expected);
+            assert_eq!(
+                contents[2 + step * 2]["parts"][0]["functionResponse"]["id"],
+                format!("call_{step}")
+            );
+        }
+        assert_eq!(contents[5]["parts"], json!([{"text":"done"}]));
+        assert_eq!(contents[6]["parts"], json!([{"text":"continue"}]));
+
+        for kind in [
+            ProviderKind::OpenAI,
+            ProviderKind::Anthropic,
+            ProviderKind::OpenAICompatible,
+        ] {
+            let mut switched = messages.clone();
+            super::retain_provider_replay(&mut switched, kind);
+            assert!(!switched
+                .iter()
+                .any(|message| matches!(message, AisdkMessage::Reasoning(_))));
+            assert!(!serde_json::to_string(&switched)
+                .unwrap()
+                .contains("thoughtSignature"));
+            assert_eq!(
+                switched
+                    .iter()
+                    .filter(|message| matches!(message, AisdkMessage::ToolCall(_)))
+                    .count(),
+                2
+            );
+        }
+        let mut retained = messages.clone();
+        super::retain_provider_replay(&mut retained, ProviderKind::Antigravity);
+        assert_eq!(retained.len(), messages.len());
+        let mut other_reasoning = vec![AisdkMessage::reasoning(
+            Some("rs_openai".into()),
+            "summary",
+            Some("openai-encrypted".into()),
+        )];
+        super::retain_provider_replay(&mut other_reasoning, ProviderKind::OpenAI);
+        assert_eq!(other_reasoning.len(), 1);
+    }
+
+    #[test]
+    fn google_oauth_gate_requires_google_and_oauth() {
+        let oauth = AuthConfig::OAuth {
+            refresh: "refresh".into(),
+            access: "access".into(),
+            expires: 200_000,
+            account_id: None,
+            enterprise_url: None,
+            project_id: Some("project".into()),
+        };
+        let api = AuthConfig::Api {
+            key: "api-key".into(),
+        };
+        for provider in [
+            "google",
+            "Google",
+            "google-vertex",
+            "openai",
+            "xai",
+            "other",
+            "",
+        ] {
+            for auth in [Some(&oauth), Some(&api), Some(&AuthConfig::Local), None] {
+                assert_eq!(
+                    super::uses_google_oauth(provider, auth),
+                    provider == "google" && matches!(auth, Some(AuthConfig::OAuth { .. })),
+                    "provider={provider}, auth={auth:?}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn google_oauth_credentials_route_transport_and_preserve_request_settings() {
+        let mut config = ProviderRequestConfig::new(
+            ProviderKind::OpenAI,
+            "Google".into(),
+            "https://generativelanguage.googleapis.com".into(),
+            "gemini-3-pro".into(),
+            Some("old-access".into()),
+            None,
+            true,
+        );
+        config.supports_audio_input = true;
+        config.gateway_caching_auto = true;
+        config.prune_tool_outputs = true;
+        config.openai_options.prompt_cache_key = Some("session-cache".into());
+        config.openai_options.force_store_false = true;
+        config
+            .openai_options
+            .additional_headers
+            .insert("X-Custom".into(), "preserved".into());
+        config
+            .openai_options
+            .additional_headers
+            .insert("User-Agent".into(), "old-agent".into());
+        let original = config.clone();
+        for project_id in [Some("resolved-project".to_owned()), None] {
+            config.openai_options.antigravity_project = Some("stale-project".into());
+            let credentials = crate::auth::OAuthCredentials {
+                refresh: "refresh-not-for-requests".into(),
+                access: "new-access".into(),
+                expires: 300_000,
+                account_id: Some("account".into()),
+                enterprise_url: None,
+                project_id: project_id.clone(),
+            };
+
+            super::apply_google_oauth_credentials(&mut config, &credentials);
+
+            assert_eq!(config.kind, ProviderKind::Antigravity);
+            assert_eq!(
+                config.base_url,
+                crate::auth::antigravity_oauth::ANTIGRAVITY_ENDPOINT
+            );
+            assert_eq!(config.api_key.as_deref(), Some("new-access"));
+            let mut expected_options = original.openai_options.clone();
+            expected_options.antigravity_project = project_id;
+            expected_options.additional_headers.insert(
+                "User-Agent".into(),
+                crate::auth::antigravity_oauth::user_agent().into(),
+            );
+            assert_eq!(config.openai_options, expected_options);
+            assert_eq!(config.provider_name, original.provider_name);
+            assert_eq!(config.model_name, original.model_name);
+            assert_eq!(config.reasoning_effort, original.reasoning_effort);
+            assert_eq!(config.supports_image_input, original.supports_image_input);
+            assert_eq!(config.supports_audio_input, original.supports_audio_input);
+            assert_eq!(config.gateway_caching_auto, original.gateway_caching_auto);
+            assert_eq!(config.prune_tool_outputs, original.prune_tool_outputs);
+        }
+    }
 
     #[test]
     fn audio_model_receives_base64_audio_attachment() {

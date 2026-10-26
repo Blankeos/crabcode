@@ -5,4 +5,5 @@ pub struct OAuthCredentials {
     pub expires: i64,
     pub account_id: Option<String>,
     pub enterprise_url: Option<String>,
+    pub project_id: Option<String>,
 }

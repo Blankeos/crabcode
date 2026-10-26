@@ -2106,6 +2106,12 @@ impl Chat {
         self.add_message(Message::assistant(content));
     }
 
+    pub fn get_last_assistant_message_mut(&mut self) -> Option<&mut Message> {
+        self.messages
+            .iter_mut()
+            .rfind(|message| message.role == MessageRole::Assistant)
+    }
+
     fn streaming_assistant_idx(&self) -> Option<usize> {
         self.messages
             .iter()
@@ -9074,11 +9080,12 @@ mod tests {
     #[test]
     fn test_edit_tool_renders_codex_style_diff_summary() {
         let chat = Chat::new();
+        let file_path = std::env::current_dir().unwrap().join("README.md");
         let content = serde_json::json!({
             "name": "edit",
             "status": "ok",
             "args": {
-                "file_path": "/Users/carlo/Desktop/Projects/crabcode/README.md",
+                "file_path": file_path,
                 "old_string": "alpha\nbeta\nomega",
                 "new_string": "alpha\nbravo\nomega",
             },

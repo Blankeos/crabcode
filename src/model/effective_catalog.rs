@@ -148,7 +148,14 @@ fn write_snapshot(snapshot: &Snapshot) -> Result<()> {
 /// `None` means this installation has not published its first snapshot yet and
 /// callers should use their legacy compatibility path once.
 pub fn models_for_dialog() -> Result<Option<Vec<Model>>> {
-    Ok(load_snapshot()?.map(|snapshot| snapshot.models.into_iter().map(Model::from).collect()))
+    Ok(load_snapshot()?.map(|snapshot| {
+        let mut models = snapshot.models.into_iter().map(Model::from).collect();
+        crate::model::extensions::antigravity::apply_to_dialog_models(
+            &mut models,
+            crate::model::extensions::antigravity::uses_oauth(),
+        );
+        models
+    }))
 }
 
 /// Publishes models produced by an explicit source refresh.
