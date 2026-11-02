@@ -1057,7 +1057,7 @@ impl Input {
         let ((start_row, start_col), (end_row, end_col)) = range;
         let lines = self.textarea.lines();
 
-        let mut result = String::new();
+        let mut parts = Vec::new();
         for (i, line) in lines.iter().enumerate() {
             if i < start_row || i > end_row {
                 continue;
@@ -1072,16 +1072,13 @@ impl Input {
             } else {
                 line.len()
             };
-
-            if start >= end {
-                continue;
-            }
-            if !result.is_empty() {
-                result.push('\n');
-            }
-            result.push_str(&line[start..end]);
+            let start = start.min(line.len());
+            let end = end.min(line.len()).max(start);
+            // Keep empty rows. They are typed blank lines, not visual wraps
+            // (those stay inside a single logical row).
+            parts.push(&line[start..end]);
         }
-        result
+        parts.join("\n")
     }
 
     #[cfg(test)]
@@ -3519,6 +3516,40 @@ mod tests {
         // Selection is from char 2 to char 4 (chars positions 2 and 3)
         // With the bug, this would produce incorrect bytes; with fix, it should be "하세"
         assert_eq!(input.get_selected_text(), "하세");
+    }
+
+    #[test]
+    fn test_get_selected_text_preserves_blank_lines() {
+        let mut input = Input::new();
+        input.insert_str("Carlo is awesome\nbut yeah he's awesome\n\nSecondly, he's amazing");
+        let last_row = input.textarea.lines().len() - 1;
+        let last_col = input.textarea.lines()[last_row].chars().count();
+        input.textarea.move_cursor(CursorMove::Jump(0, 0));
+        input.textarea.start_selection();
+        input
+            .textarea
+            .move_cursor(CursorMove::Jump(last_row as u16, last_col as u16));
+
+        assert_eq!(
+            input.get_selected_text(),
+            "Carlo is awesome\nbut yeah he's awesome\n\nSecondly, he's amazing"
+        );
+    }
+
+    #[test]
+    fn test_get_selected_text_keeps_wrapped_logical_line_together() {
+        let mut input = Input::new();
+        let text = "This is a very long sentence that was linebreaked because it's too long";
+        input.insert_str(text);
+        let last_col = input.textarea.lines()[0].chars().count();
+        input.textarea.move_cursor(CursorMove::Jump(0, 0));
+        input.textarea.start_selection();
+        input
+            .textarea
+            .move_cursor(CursorMove::Jump(0, last_col as u16));
+
+        assert_eq!(input.get_selected_text(), text);
+        assert!(!input.get_selected_text().contains('\n'));
     }
 
     #[test]

@@ -725,6 +725,7 @@ fn has_known_extension(path_text: &str) -> bool {
 fn line_to_string(line: &Line<'_>) -> String {
     line.spans
         .iter()
+        .filter(|span| !crate::ui::selection::is_copy_hint_span(span))
         .map(|span| span.content.as_ref())
         .collect()
 }

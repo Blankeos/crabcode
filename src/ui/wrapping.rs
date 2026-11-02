@@ -1,6 +1,9 @@
 use std::ops::Range;
 
-use crate::ui::selection::NON_SELECTABLE_SPAN_MODIFIER;
+use crate::ui::selection::{
+    blank_line_hint_span, non_selectable_style, soft_wrap_hint_span, CopyJoin,
+    NON_SELECTABLE_SPAN_MODIFIER,
+};
 use ratatui::{
     style::Style,
     text::{Line, Span},
@@ -61,7 +64,9 @@ where
     }
 
     if flat.is_empty() {
-        return vec![line_with_indent(&options.initial_indent, line.style)];
+        let mut blank = line_with_indent(&options.initial_indent, line.style);
+        blank.spans.push(blank_line_hint_span());
+        return vec![blank];
     }
 
     let first_width = options
@@ -73,21 +78,33 @@ where
         .saturating_sub(options.subsequent_indent.width())
         .max(1);
 
-    let mut ranges = wrap_ranges(&flat, first_width, subsequent_width);
-    if ranges.is_empty() {
-        ranges.push(0..0);
+    let mut segments = wrap_segments(&flat, first_width, subsequent_width);
+    if segments.is_empty() {
+        segments.push((0..0, CopyJoin::Blank));
     }
 
-    ranges
+    segments
         .into_iter()
         .enumerate()
-        .map(|(idx, range)| {
+        .map(|(idx, (range, join))| {
             let indent = if idx == 0 {
                 &options.initial_indent
             } else {
                 &options.subsequent_indent
             };
-            line_from_range(&line, &span_bounds, &range, indent)
+            let mut rendered = line_from_range(&line, &span_bounds, &range, indent);
+            if let CopyJoin::Soft { .. } = &join {
+                let indent_spans = indent.spans.len();
+                for span in rendered.spans.iter_mut().take(indent_spans) {
+                    span.style = non_selectable_style(span.style);
+                }
+            }
+            match join {
+                CopyJoin::Soft { joiner } => rendered.spans.push(soft_wrap_hint_span(&joiner)),
+                CopyJoin::Blank => rendered.spans.push(blank_line_hint_span()),
+                CopyJoin::Hard => {}
+            }
+            rendered
         })
         .collect()
 }
@@ -179,14 +196,18 @@ pub fn sanitize_styled_line(line: &Line<'_>) -> Line<'static> {
     }
 }
 
-fn wrap_ranges(text: &str, first_width: usize, subsequent_width: usize) -> Vec<Range<usize>> {
-    let mut ranges = Vec::new();
+fn wrap_segments(
+    text: &str,
+    first_width: usize,
+    subsequent_width: usize,
+) -> Vec<(Range<usize>, CopyJoin)> {
+    let mut segments = Vec::new();
     let mut first_segment = true;
 
     for logical_line in logical_line_ranges(text) {
         let line = &text[logical_line.clone()];
         if line.is_empty() {
-            ranges.push(logical_line.start..logical_line.start);
+            segments.push((logical_line.start..logical_line.start, CopyJoin::Blank));
             first_segment = false;
             continue;
         }
@@ -197,15 +218,25 @@ fn wrap_ranges(text: &str, first_width: usize, subsequent_width: usize) -> Vec<R
             subsequent_width
         };
         let line_ranges = wrap_single_line_ranges(line, line_first_width, subsequent_width);
-        ranges.extend(
-            line_ranges
-                .into_iter()
-                .map(|range| logical_line.start + range.start..logical_line.start + range.end),
-        );
+        for (idx, range) in line_ranges.into_iter().enumerate() {
+            let absolute = logical_line.start + range.start..logical_line.start + range.end;
+            let join = if idx == 0 {
+                CopyJoin::Hard
+            } else {
+                let previous_end = segments
+                    .last()
+                    .map(|(prev, _)| prev.end)
+                    .unwrap_or(absolute.start);
+                CopyJoin::Soft {
+                    joiner: text[previous_end..absolute.start].to_string(),
+                }
+            };
+            segments.push((absolute, join));
+        }
         first_segment = false;
     }
 
-    ranges
+    segments
 }
 
 fn logical_line_ranges(text: &str) -> Vec<Range<usize>> {
@@ -455,6 +486,7 @@ mod tests {
     fn line_text(line: &Line<'_>) -> String {
         line.spans
             .iter()
+            .filter(|span| !crate::ui::selection::is_copy_hint_span(span))
             .map(|span| span.content.as_ref())
             .collect()
     }
@@ -615,5 +647,57 @@ mod tests {
             .spans
             .iter()
             .all(|span| !span.content.contains(['\n', '\r']))));
+    }
+
+    fn copied(line: &Line<'_>, width: usize) -> String {
+        copied_with(line, WrapOptions::new(width))
+    }
+
+    fn copied_with(line: &Line<'_>, options: WrapOptions<'_>) -> String {
+        let wrapped = wrap_styled_line(line, options);
+        let mut selection = crate::ui::selection::Selection::new();
+        let last = wrapped.len().saturating_sub(1);
+        let end_col = wrapped
+            .last()
+            .map(|segment| {
+                segment
+                    .spans
+                    .iter()
+                    .filter(|span| !crate::ui::selection::is_copy_hint_span(span))
+                    .map(|span| unicode_width::UnicodeWidthStr::width(span.content.as_ref()))
+                    .sum()
+            })
+            .unwrap_or(0);
+        selection.start(0, 0);
+        selection.extend(last, end_col);
+        selection.finish();
+        crate::ui::selection::extract_selected_text(&wrapped, &selection).unwrap_or_default()
+    }
+
+    #[test]
+    fn copy_joins_word_wraps_and_keeps_removed_spaces() {
+        let source = "hello  world again";
+        assert_eq!(copied(&Line::from(source), 8), source);
+    }
+
+    #[test]
+    fn copy_joins_mid_word_wrap_without_inserting_a_space() {
+        assert_eq!(copied(&Line::from("Replaced"), 4), "Replaced");
+    }
+
+    #[test]
+    fn copy_keeps_hard_breaks_and_blank_lines() {
+        let line = Line::from(Span::raw("hello\n\nworld"));
+        assert_eq!(copied(&line, 40), "hello\n\nworld");
+    }
+
+    #[test]
+    fn copy_drops_visual_continuation_indent() {
+        let line = Line::from("one two three four");
+        let copied = copied_with(
+            &line,
+            WrapOptions::new(10).subsequent_indent(Line::from("  ")),
+        );
+        assert_eq!(copied, "one two three four");
     }
 }

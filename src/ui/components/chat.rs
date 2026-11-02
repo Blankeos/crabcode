@@ -7078,6 +7078,9 @@ fn plain_line_text(line: &Line<'_>) -> String {
 fn plain_line_text_into(line: &Line<'_>, text: &mut String) {
     text.clear();
     for span in &line.spans {
+        if crate::ui::selection::is_copy_hint_span(span) {
+            continue;
+        }
         text.push_str(span.content.as_ref());
     }
 }
@@ -7144,7 +7147,10 @@ fn trim_trailing_blank_highlight_lines(
 }
 
 fn line_is_blank(line: &Line<'_>) -> bool {
-    line.spans.iter().all(|span| span.content.trim().is_empty())
+    line.spans
+        .iter()
+        .filter(|span| !crate::ui::selection::is_copy_hint_span(span))
+        .all(|span| span.content.trim().is_empty())
 }
 
 fn push_plain_line_with_no_location<'a>(
@@ -9960,6 +9966,92 @@ codex exec --skip-git-repo-check \
     }
 
     #[test]
+    fn selected_wrapped_user_text_joins_visual_lines() {
+        let colors = test_colors();
+        let content = "This is a very long sentence that was linebreaked because it's too long hahahaha nice job nerd you are cool and awesome and you deserve to be cool!";
+        let mut chat = Chat::with_messages(vec![Message::user(content)]);
+        let rendered_width = 36;
+        let (lines, positions) =
+            chat.build_all_lines_with_positions(rendered_width, "model", &colors);
+        chat.cached_lines = lines.into_iter().map(line_to_static).collect();
+        chat.cached_positions = positions.clone();
+        chat.message_line_positions = positions;
+        chat.content_height = chat.cached_lines.len();
+        chat.viewport_height = 20;
+        chat.scroll_offset = 0;
+
+        let content_lines = chat
+            .cached_lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| {
+                line_text(line).contains("This is") || line_text(line).contains("cool!")
+            })
+            .map(|(idx, _)| idx)
+            .collect::<Vec<_>>();
+        let first_line = *content_lines.first().expect("wrapped start");
+        let last_line = chat
+            .cached_lines
+            .iter()
+            .rposition(|line| line_text(line).contains("cool!"))
+            .expect("wrapped end");
+        assert!(last_line > first_line, "sentence should wrap across rows");
+        let last_width = UnicodeWidthStr::width(line_text(&chat.cached_lines[last_line]).as_str());
+
+        chat.selection.active = true;
+        chat.selection.start_line = first_line;
+        chat.selection.start_col = 0;
+        chat.selection.end_line = last_line;
+        chat.selection.end_col = last_width;
+
+        assert_eq!(
+            chat.get_selected_text(rendered_width, "model", &colors)
+                .as_deref(),
+            Some(content)
+        );
+    }
+
+    #[test]
+    fn selected_user_text_preserves_blank_lines() {
+        let colors = test_colors();
+        let content = "Carlo is awesome\nbut yeah he's awesome\n\nSecondly, he's amazing";
+        let mut chat = Chat::with_messages(vec![Message::user(content)]);
+        let rendered_width = 60;
+        let (lines, positions) =
+            chat.build_all_lines_with_positions(rendered_width, "model", &colors);
+        chat.cached_lines = lines.into_iter().map(line_to_static).collect();
+        chat.cached_positions = positions.clone();
+        chat.message_line_positions = positions;
+        chat.content_height = chat.cached_lines.len();
+        chat.viewport_height = 20;
+        chat.scroll_offset = 0;
+
+        let first_line = chat
+            .cached_lines
+            .iter()
+            .position(|line| line_text(line).contains("Carlo is awesome"))
+            .expect("first line");
+        let last_line = chat
+            .cached_lines
+            .iter()
+            .position(|line| line_text(line).contains("Secondly"))
+            .expect("last line");
+        let last_width = UnicodeWidthStr::width(line_text(&chat.cached_lines[last_line]).as_str());
+
+        chat.selection.active = true;
+        chat.selection.start_line = first_line;
+        chat.selection.start_col = 0;
+        chat.selection.end_line = last_line;
+        chat.selection.end_col = last_width;
+
+        assert_eq!(
+            chat.get_selected_text(rendered_width, "model", &colors)
+                .as_deref(),
+            Some(content)
+        );
+    }
+
+    #[test]
     fn selected_thinking_text_excludes_gutter_pipe() {
         let colors = test_colors();
         let mut assistant = Message::assistant("Final answer");
@@ -9998,7 +10090,7 @@ codex exec --skip-git-repo-check \
             .get_selected_text(rendered_width, "model", &colors)
             .expect("selected thinking text");
 
-        assert_eq!(selected, "First thought\nSecond thought");
+        assert_eq!(selected, "First thought\n\nSecond thought");
         assert!(!selected.contains('│'));
     }
 

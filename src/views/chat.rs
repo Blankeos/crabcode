@@ -453,7 +453,12 @@ pub fn render_chat(
                 let mut spans = Vec::with_capacity(content_line.spans.len() + 3);
                 spans.push(Span::styled("▌", border_style));
                 spans.push(Span::styled(" ".repeat(horizontal_padding), pad_style));
-                spans.extend(content_line.spans);
+                spans.extend(
+                    content_line
+                        .spans
+                        .into_iter()
+                        .filter(|span| !crate::ui::selection::is_copy_hint_span(span)),
+                );
                 spans.push(Span::styled(trailing_padding, pad_style));
                 let mut panel_line = Line::from(spans);
                 panel_line.style = Style::default().bg(bg);

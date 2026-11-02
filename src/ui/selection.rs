@@ -27,6 +27,82 @@ fn is_selectable_span(span: &Span<'_>) -> bool {
         .contains(NON_SELECTABLE_SPAN_MODIFIER)
 }
 
+/// How a rendered row joins to the previous row when copied.
+///
+/// Soft wraps are a display artifact: the clipboard should keep the source
+/// spacing (`joiner`) and drop the terminal width break. `indent_cols` is the
+/// visual continuation indent, which is not part of the copied text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CopyJoin {
+    Hard,
+    Soft { joiner: String },
+    Blank,
+}
+
+const SOFT_HINT_PREFIX: &str = "\u{200B}\u{200D}";
+const BLANK_HINT: &str = "\u{200B}\u{200C}";
+
+pub fn soft_wrap_hint_span(joiner: &str) -> Span<'static> {
+    let mut content = String::from(SOFT_HINT_PREFIX);
+    for byte in joiner.bytes() {
+        content.push(hint_nibble(byte >> 4));
+        content.push(hint_nibble(byte & 0x0f));
+    }
+    Span::styled(content, non_selectable_style(Style::default()))
+}
+
+pub fn blank_line_hint_span() -> Span<'static> {
+    Span::styled(
+        BLANK_HINT.to_string(),
+        non_selectable_style(Style::default()),
+    )
+}
+
+pub fn is_copy_hint_span(span: &Span<'_>) -> bool {
+    let content = span.content.as_ref();
+    content.starts_with(SOFT_HINT_PREFIX) || content == BLANK_HINT
+}
+
+pub fn copy_join_of_line(line: &ratatui::text::Line<'_>) -> CopyJoin {
+    line.spans
+        .iter()
+        .find_map(decode_copy_hint)
+        .unwrap_or(CopyJoin::Hard)
+}
+
+fn hint_nibble(nibble: u8) -> char {
+    char::from_u32(0xE0030 + u32::from(nibble)).unwrap_or('\u{2060}')
+}
+
+fn decode_nibble(ch: char) -> Option<u8> {
+    let raw = ch as u32;
+    let nibble = raw.checked_sub(0xE0030)?;
+    (nibble < 16).then_some(nibble as u8)
+}
+
+fn decode_copy_hint(span: &Span<'_>) -> Option<CopyJoin> {
+    if !is_copy_hint_span(span) {
+        return None;
+    }
+    let content = span.content.as_ref();
+    if content == BLANK_HINT {
+        return Some(CopyJoin::Blank);
+    }
+    let joiner_hex = content.strip_prefix(SOFT_HINT_PREFIX)?;
+    let nibbles = joiner_hex.chars().collect::<Vec<_>>();
+    if nibbles.len() % 2 != 0 {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(nibbles.len() / 2);
+    for pair in nibbles.chunks(2) {
+        let high = decode_nibble(pair[0])?;
+        let low = decode_nibble(pair[1])?;
+        bytes.push((high << 4) | low);
+    }
+    let joiner = String::from_utf8(bytes).ok()?;
+    Some(CopyJoin::Soft { joiner })
+}
+
 fn visible_style(mut style: Style) -> Style {
     style.add_modifier.remove(NON_SELECTABLE_SPAN_MODIFIER);
     style.sub_modifier.remove(NON_SELECTABLE_SPAN_MODIFIER);
@@ -38,7 +114,12 @@ fn visible_span<'a>(span: Span<'a>) -> Span<'a> {
 }
 
 fn strip_non_selectable_markers<'a>(line: ratatui::text::Line<'a>) -> ratatui::text::Line<'a> {
-    let spans = line.spans.into_iter().map(visible_span).collect();
+    let spans = line
+        .spans
+        .into_iter()
+        .filter(|span| !is_copy_hint_span(span))
+        .map(visible_span)
+        .collect();
     ratatui::text::Line {
         spans,
         style: line.style,
@@ -204,6 +285,12 @@ impl Selection {
             return None;
         }
 
+        // A wrapped-away blank row has no cells, but a drag that crosses it
+        // still covers that row. Keep it so the blank survives the copy.
+        if line > s_line && line < e_line {
+            return Some((0, line_width));
+        }
+
         let start = if line == s_line { s_col } else { 0 };
         let end = if line == e_line { e_col } else { line_width };
 
@@ -251,6 +338,7 @@ pub fn apply_selection_to_lines_with_offset<'a>(
             let line_width: usize = line
                 .spans
                 .iter()
+                .filter(|span| !is_copy_hint_span(span))
                 .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
                 .sum();
             let sel_range = selection.selection_range_in_line(line_idx, line_width);
@@ -275,6 +363,9 @@ pub fn apply_selection_to_lines_with_offset<'a>(
             let mut col = 0usize;
             let mut styled_spans = Vec::new();
             for span in line.spans {
+                if is_copy_hint_span(&span) {
+                    continue;
+                }
                 let span_width = unicode_width::UnicodeWidthStr::width(span.content.as_ref());
                 if is_selectable_span(&span) {
                     let new_spans = split_and_style_span(&span, col, accent, sel_range);
@@ -290,6 +381,9 @@ pub fn apply_selection_to_lines_with_offset<'a>(
 }
 
 /// Extract the selected text from the rendered content lines.
+///
+/// Visual wraps are joined with the spacing the wrapper removed. Typed line
+/// breaks, including blank lines, stay in the clipboard.
 pub fn extract_selected_text(
     lines: &[ratatui::text::Line<'_>],
     selection: &Selection,
@@ -299,15 +393,18 @@ pub fn extract_selected_text(
     }
     let ((s_line, _), (e_line, _)) = selection.range();
     let mut result = String::new();
+    let mut previous_line: Option<usize> = None;
 
     for (line_idx, line) in lines.iter().enumerate() {
         if line_idx < s_line || line_idx > e_line {
             continue;
         }
 
+        let join = copy_join_of_line(line);
         let line_width: usize = line
             .spans
             .iter()
+            .filter(|span| !is_copy_hint_span(span))
             .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
             .sum();
         let Some((start, end)) = selection.selection_range_in_line(line_idx, line_width) else {
@@ -317,6 +414,9 @@ pub fn extract_selected_text(
         let mut line_part = String::new();
         let mut col = 0usize;
         for span in &line.spans {
+            if is_copy_hint_span(span) {
+                continue;
+            }
             let span_width = unicode_width::UnicodeWidthStr::width(span.content.as_ref());
             let span_end = col.saturating_add(span_width);
 
@@ -333,14 +433,25 @@ pub fn extract_selected_text(
             col = span_end;
         }
 
-        if line_part.is_empty() {
+        // Blank logical lines have no selectable glyphs. Keep them when the
+        // drag covers the row; skip every other empty row (gutters, spacers).
+        if line_part.is_empty() && !matches!(join, CopyJoin::Blank) {
             continue;
         }
 
-        if !result.is_empty() {
-            result.push('\n');
+        if let Some(previous) = previous_line {
+            if line_idx == previous + 1 {
+                if let CopyJoin::Soft { joiner } = &join {
+                    result.push_str(joiner);
+                } else {
+                    result.push('\n');
+                }
+            } else {
+                result.push('\n');
+            }
         }
         result.push_str(&line_part);
+        previous_line = Some(line_idx);
     }
 
     if result.is_empty() {
