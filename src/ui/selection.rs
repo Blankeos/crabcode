@@ -334,6 +334,40 @@ pub fn apply_selection_to_lines<'a>(
     apply_selection_to_lines_with_offset(lines, selection, accent, 0)
 }
 
+/// Paint a full-width selection bar on blank rows the drag crosses.
+///
+/// Those rows have no glyphs, so span styling never shows up and the copied
+/// newline looks like it came from nowhere.
+pub fn paint_selected_blank_lines(
+    lines: &mut [ratatui::text::Line<'_>],
+    selection: &Selection,
+    line_offset: usize,
+    width: usize,
+    accent: Color,
+) {
+    if !selection.active || width == 0 || lines.is_empty() {
+        return;
+    }
+    let ((s_line, _), (e_line, _)) = selection.range();
+    let style = Style::default().bg(accent).fg(contrast_text(accent));
+
+    for (visible_idx, line) in lines.iter_mut().enumerate() {
+        let line_idx = line_offset + visible_idx;
+        if line_idx <= s_line || line_idx >= e_line {
+            continue;
+        }
+        let has_glyphs = line.spans.iter().any(|span| {
+            !is_copy_hint_span(span)
+                && unicode_width::UnicodeWidthStr::width(span.content.as_ref()) > 0
+        });
+        if has_glyphs {
+            continue;
+        }
+        line.spans = vec![Span::styled(" ".repeat(width), style)];
+        line.style = line.style.patch(style);
+    }
+}
+
 /// Apply selection styling to visible lines whose first line starts at
 /// `line_offset` in the full rendered transcript.
 pub fn apply_selection_to_lines_with_offset<'a>(
@@ -562,12 +596,15 @@ fn extract_selected(
             col = span_end;
         }
 
-        // Blank logical lines have no selectable glyphs. Keep them when the
-        // drag covers the row; skip every other empty row (gutters, spacers).
+        // A row with no selectable glyphs is still a visible blank line when
+        // the drag crosses it. Keep that newline so the paste matches the gap
+        // on screen. Rows the selection only touches at a boundary stay out.
+        let interior = line_idx > s_line && line_idx < e_line;
         if pieces
             .iter()
             .all(|piece| piece.text.is_empty() && piece.link_url.is_none())
             && !matches!(join, CopyJoin::Blank)
+            && !interior
         {
             continue;
         }

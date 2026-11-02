@@ -4343,11 +4343,18 @@ impl Chat {
             }
         }
 
-        let content_lines = crate::ui::selection::apply_selection_to_lines_with_offset(
+        let mut content_lines = crate::ui::selection::apply_selection_to_lines_with_offset(
             content_lines,
             &self.selection,
             colors.accent,
             visible_start,
+        );
+        crate::ui::selection::paint_selected_blank_lines(
+            &mut content_lines,
+            &self.selection,
+            visible_start,
+            render_area.width as usize,
+            colors.accent,
         );
 
         let paragraph = Paragraph::new(Text::from(content_lines));
@@ -9790,6 +9797,55 @@ mod tests {
             .sum();
         assert_eq!(underlined, expected);
         assert!(underlined >= path.len());
+    }
+
+    #[test]
+    fn selected_assistant_list_keeps_and_highlights_the_visible_gap() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let mut colors = test_colors();
+        colors.accent = Color::Rgb(255, 80, 0);
+        let content = "feat: add vlm-agent\n\n- Replace frontend\n- Add extract-images";
+        let mut chat = Chat::with_messages(vec![Message::assistant(content)]);
+        let area = Rect::new(0, 0, 80, 12);
+        let backend = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| chat.render(f, area, "Plan", "model", &colors))
+            .unwrap();
+
+        let title = chat
+            .cached_lines
+            .iter()
+            .position(|line| line_text(line).contains("feat:"))
+            .expect("title");
+        let last = chat
+            .cached_lines
+            .iter()
+            .position(|line| line_text(line).contains("extract-images"))
+            .expect("last item");
+        let last_width = UnicodeWidthStr::width(line_text(&chat.cached_lines[last]).as_str());
+        chat.selection.active = true;
+        chat.selection.start_line = title;
+        chat.selection.start_col = 0;
+        chat.selection.end_line = last;
+        chat.selection.end_col = last_width;
+
+        assert_eq!(
+            chat.get_selected_text(area.width as usize, "model", &colors)
+                .as_deref(),
+            Some("feat: add vlm-agent\n\n- Replace frontend\n- Add extract-images")
+        );
+
+        terminal
+            .draw(|f| chat.render(f, area, "Plan", "model", &colors))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let gap = title + 1;
+        assert!(
+            (0..area.width.saturating_sub(2)).any(|x| buffer[(x, gap as u16)].bg == colors.accent),
+            "the blank row between the title and the list should be highlighted"
+        );
     }
 
     #[test]
