@@ -886,7 +886,7 @@ enum Command {
         command: MaintenanceCommand,
     },
 
-    /// Manage MCP servers (list / auth / logout)
+    /// Manage MCP servers (list / add / auth / logout)
     Mcp {
         #[command(subcommand)]
         command: McpCommand,
@@ -954,6 +954,30 @@ enum JobsCommand {
 enum McpCommand {
     /// List configured MCP servers
     List,
+    /// Add an MCP server to the crabcode config.
+    ///
+    /// Remote servers use `--url`. Local servers pass the command after `--`.
+    /// Writes the project config (`.crabcode/crabcode.jsonc` by default).
+    /// `--global` writes the global crabcode config instead.
+    Add {
+        /// Server name
+        name: String,
+        /// URL for a remote MCP server
+        #[arg(long)]
+        url: Option<String>,
+        /// Environment variable for a local server (KEY=VALUE)
+        #[arg(long = "env", value_name = "KEY=VALUE")]
+        env: Vec<String>,
+        /// HTTP header for a remote server (KEY=VALUE)
+        #[arg(long, value_name = "KEY=VALUE")]
+        header: Vec<String>,
+        /// Write the global config instead of the project config
+        #[arg(long)]
+        global: bool,
+        /// Local server command, after `--`
+        #[arg(last = true, allow_hyphen_values = true, value_name = "COMMAND")]
+        command: Vec<String>,
+    },
     /// Authenticate a remote MCP server (browser OAuth)
     Auth {
         /// Server name from config, e.g. doop
@@ -1175,6 +1199,23 @@ async fn main() -> Result<()> {
         Some(Command::Mcp { command }) => {
             let cli = match command {
                 McpCommand::List => crate::mcp::cli::McpCliCommand::List,
+                McpCommand::Add {
+                    name,
+                    url,
+                    env,
+                    header,
+                    global,
+                    command,
+                } => crate::mcp::cli::McpCliCommand::Add(crate::mcp::add::AddRequest {
+                    name: name.clone(),
+                    url: url.clone(),
+                    env: env.clone(),
+                    header: header.clone(),
+                    global: *global,
+                    command: command.clone(),
+                    cwd: None,
+                    xdg_config_home: None,
+                }),
                 McpCommand::Auth { name } => {
                     crate::mcp::cli::McpCliCommand::Auth { name: name.clone() }
                 }
@@ -2074,4 +2115,86 @@ async fn run_event_loop(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod cli_parse_tests {
+    use super::*;
+
+    #[test]
+    fn mcp_add_parses_remote_url_and_headers() {
+        let args = Args::try_parse_from([
+            "crabcode",
+            "mcp",
+            "add",
+            "context7",
+            "--url",
+            "https://mcp.context7.com/mcp",
+            "--header",
+            "CONTEXT7_API_KEY=secret",
+            "--global",
+        ])
+        .unwrap();
+        match args.command {
+            Some(Command::Mcp {
+                command:
+                    McpCommand::Add {
+                        name,
+                        url,
+                        header,
+                        global,
+                        command,
+                        env,
+                    },
+            }) => {
+                assert_eq!(name, "context7");
+                assert_eq!(url.as_deref(), Some("https://mcp.context7.com/mcp"));
+                assert_eq!(header, vec!["CONTEXT7_API_KEY=secret"]);
+                assert!(global);
+                assert!(command.is_empty());
+                assert!(env.is_empty());
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mcp_add_parses_local_command_after_double_dash() {
+        let args = Args::try_parse_from([
+            "crabcode",
+            "mcp",
+            "add",
+            "everything",
+            "--env",
+            "LOG_LEVEL=debug",
+            "--",
+            "npx",
+            "-y",
+            "@modelcontextprotocol/server-everything",
+        ])
+        .unwrap();
+        match args.command {
+            Some(Command::Mcp {
+                command:
+                    McpCommand::Add {
+                        name,
+                        url,
+                        env,
+                        command,
+                        global,
+                        ..
+                    },
+            }) => {
+                assert_eq!(name, "everything");
+                assert!(url.is_none());
+                assert_eq!(env, vec!["LOG_LEVEL=debug"]);
+                assert_eq!(
+                    command,
+                    vec!["npx", "-y", "@modelcontextprotocol/server-everything"]
+                );
+                assert!(!global);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
 }

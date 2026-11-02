@@ -63,6 +63,14 @@ Use the OpenCode MCP docs for the config shape. crabcode reads the same top-leve
 
 MCP OAuth works like OpenCode (`crabcode mcp auth <name>`, or `a` in `/mcp`). Tokens are stored in `~/.local/state/crabcode/mcp-auth.json`.
 
+`crabcode mcp add` writes a server into the crabcode config layer: the project file (`.crabcode/crabcode.jsonc` when none exists yet) or, with `--global`, the global crabcode file. The entry is the top-level `mcp.<name>` object crabcode already reads, not OpenCode v2's `mcp.servers` map.
+
+```bash
+crabcode mcp add context7 --url https://mcp.context7.com/mcp
+crabcode mcp add everything --env LOG_LEVEL=debug -- npx -y @modelcontextprotocol/server-everything
+crabcode mcp add context7 --url https://mcp.context7.com/mcp --header 'CONTEXT7_API_KEY={env:CONTEXT7_API_KEY}'
+```
+
 MCP server `enabled` flags are respected. The remote UI can toggle configured servers, and those overrides are persisted in crabcode preferences. MCP resources are not exposed as separate resource-list/read tools yet; tool calls are supported.
 
 ## Use the OpenCode docs

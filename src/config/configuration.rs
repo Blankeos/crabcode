@@ -809,7 +809,7 @@ impl ConfigLoader {
     }
 }
 
-fn xdg_config_home() -> PathBuf {
+pub(crate) fn xdg_config_home() -> PathBuf {
     if let Ok(val) = std::env::var("XDG_CONFIG_HOME") {
         if !val.trim().is_empty() {
             return PathBuf::from(val);
@@ -820,7 +820,7 @@ fn xdg_config_home() -> PathBuf {
         .join(".config")
 }
 
-fn discover_project_root(cwd: &Path) -> PathBuf {
+pub(crate) fn discover_project_root(cwd: &Path) -> PathBuf {
     let mut current = cwd.to_path_buf();
     let mut saw_git = false;
     loop {

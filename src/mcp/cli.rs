@@ -4,6 +4,12 @@ use anyhow::{anyhow, Result};
 pub async fn run(command: McpCliCommand) -> Result<()> {
     match command {
         McpCliCommand::List => list().await,
+        McpCliCommand::Add(request) => {
+            let name = request.name.clone();
+            let path = super::add::add_mcp(request)?;
+            println!("MCP server \"{name}\" added to {}", path.display());
+            Ok(())
+        }
         McpCliCommand::Auth { name } => auth(&name).await,
         McpCliCommand::Logout { name } => logout(&name),
     }
@@ -12,6 +18,7 @@ pub async fn run(command: McpCliCommand) -> Result<()> {
 #[derive(Debug, Clone)]
 pub enum McpCliCommand {
     List,
+    Add(super::add::AddRequest),
     Auth { name: String },
     Logout { name: String },
 }

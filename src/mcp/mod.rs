@@ -1,3 +1,4 @@
+pub mod add;
 pub mod cli;
 mod credentials;
 pub mod oauth;
