@@ -1229,4 +1229,104 @@ mod tests {
             );
         }
     }
+
+    fn copied_markdown(input: &str, width: usize) -> String {
+        let colors = test_colors();
+        let lines = render_markdown(input, width, &colors);
+        let mut selection = crate::ui::selection::Selection::new();
+        selection.start(0, 0);
+        let last = lines.len().saturating_sub(1);
+        let end_col = lines.get(last).map(line_display_width).unwrap_or(0);
+        selection.extend(last, end_col);
+        selection.finish();
+        crate::ui::selection::extract_selected_markdown(&lines, &selection, &colors)
+            .unwrap_or_default()
+    }
+
+    fn line_display_width(line: &Line<'_>) -> usize {
+        line.spans
+            .iter()
+            .filter(|span| !crate::ui::selection::is_copy_hint_span(span))
+            .map(|span| unicode_width::UnicodeWidthStr::width(span.content.as_ref()))
+            .sum()
+    }
+
+    #[test]
+    fn copy_restores_hidden_inline_markdown() {
+        let copied = copied_markdown(
+            "This is a **bold** statement, and this is *italic* text. You can also combine them for ***bold and italic***. Use `inline` and ~~gone~~.",
+            120,
+        );
+        assert!(
+            copied.contains("**bold**"),
+            "missing bold markers: {copied}"
+        );
+        assert!(copied.contains("*italic*"), "missing italic: {copied}");
+        assert!(
+            copied.contains("***bold and italic***"),
+            "missing combined markers: {copied}"
+        );
+        assert!(copied.contains("`inline`"), "missing code: {copied}");
+        assert!(copied.contains("~~gone~~"), "missing strike: {copied}");
+    }
+
+    #[test]
+    fn copy_restores_inline_markdown_across_wraps() {
+        let copied = copied_markdown(
+            "say **hello world** please and [GitHub](https://github.com) too",
+            16,
+        );
+        assert!(
+            copied.contains("**hello world**"),
+            "bold split across the wrap: {copied}"
+        );
+        assert!(
+            copied.contains("[GitHub](https://github.com)"),
+            "link split across the wrap: {copied}"
+        );
+        assert!(!copied.contains("GitHub (https"), "{copied}");
+    }
+
+    #[test]
+    fn copy_restores_link_markdown() {
+        let copied = copied_markdown("See [GitHub](https://github.com) now.", 80);
+        assert!(
+            copied.contains("[GitHub](https://github.com)"),
+            "link was not restored: {copied}"
+        );
+        assert!(
+            !copied.contains("GitHub (https://github.com)"),
+            "visible link form leaked: {copied}"
+        );
+    }
+
+    #[test]
+    fn copy_restores_table_link_without_showing_the_url() {
+        let colors = test_colors();
+        let input = "| Name |\n| --- |\n| [GitHub](https://github.com) |\n";
+        let lines = render_markdown(input, 40, &colors);
+        let visible = lines
+            .iter()
+            .map(line_to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !visible.contains("https://github.com"),
+            "table should keep the url hidden: {visible}"
+        );
+        let copied = copied_markdown(input, 40);
+        assert!(
+            copied.contains("[GitHub](https://github.com)"),
+            "table link was not restored: {copied}"
+        );
+    }
+
+    #[test]
+    fn copy_leaves_code_fences_and_quotes_alone() {
+        let copied = copied_markdown("> just a quote\n\n```\nplain\n```\n", 40);
+        assert!(copied.contains("> just a quote"), "{copied}");
+        assert!(!copied.contains("*just a quote*"), "{copied}");
+        assert!(copied.contains("```"), "{copied}");
+        assert!(!copied.contains("`plain`"), "{copied}");
+    }
 }

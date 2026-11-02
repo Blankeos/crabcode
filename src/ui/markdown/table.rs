@@ -33,6 +33,7 @@ pub(super) fn render_tables(
     let mut row = Vec::new();
     let mut cell = Line::default();
     let mut inline_styles = vec![Style::default()];
+    let mut link_urls: Vec<String> = Vec::new();
 
     for (event, range) in parser {
         match event {
@@ -61,23 +62,37 @@ pub(super) fn render_tables(
             Event::End(TagEnd::TableCell) => {
                 row.push(std::mem::take(&mut cell));
             }
-            Event::Start(
-                tag @ (Tag::Strong | Tag::Emphasis | Tag::Strikethrough | Tag::Link { .. }),
-            ) if table_start.is_some() => {
+            Event::Start(Tag::Link { dest_url, .. }) if table_start.is_some() => {
+                let current = *inline_styles.last().unwrap();
+                inline_styles.push(
+                    current
+                        .fg(colors.markdown_link)
+                        .add_modifier(Modifier::UNDERLINED),
+                );
+                link_urls.push(dest_url.into_string());
+            }
+            Event::Start(tag @ (Tag::Strong | Tag::Emphasis | Tag::Strikethrough))
+                if table_start.is_some() =>
+            {
                 let current = *inline_styles.last().unwrap();
                 let style = match tag {
                     Tag::Strong => current.add_modifier(Modifier::BOLD),
                     Tag::Emphasis => current.add_modifier(Modifier::ITALIC),
                     Tag::Strikethrough => current.add_modifier(Modifier::CROSSED_OUT),
-                    _ => current
-                        .fg(colors.markdown_link)
-                        .add_modifier(Modifier::UNDERLINED),
+                    _ => current,
                 };
                 inline_styles.push(style);
             }
-            Event::End(
-                TagEnd::Strong | TagEnd::Emphasis | TagEnd::Strikethrough | TagEnd::Link,
-            ) if table_start.is_some() => {
+            Event::End(TagEnd::Link) if table_start.is_some() => {
+                inline_styles.pop();
+                if let Some(url) = link_urls.pop() {
+                    cell.spans
+                        .push(crate::ui::selection::link_dest_hint_span(&url));
+                }
+            }
+            Event::End(TagEnd::Strong | TagEnd::Emphasis | TagEnd::Strikethrough)
+                if table_start.is_some() =>
+            {
                 inline_styles.pop();
             }
             Event::Text(text) if table_start.is_some() => {
@@ -389,6 +404,7 @@ mod tests {
             .map(|line| {
                 line.spans
                     .iter()
+                    .filter(|span| !crate::ui::selection::is_copy_hint_span(span))
                     .map(|span| span.content.as_ref())
                     .collect::<String>()
             })

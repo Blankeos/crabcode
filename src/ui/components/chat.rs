@@ -3778,15 +3778,16 @@ impl Chat {
 
         let ((s_line, _), (e_line, _)) = self.selection.range();
         if s_line < self.cached_lines.len() && e_line < self.cached_lines.len() {
-            return crate::ui::selection::extract_selected_text(
+            return crate::ui::selection::extract_selected_markdown(
                 &self.cached_lines,
                 &self.selection,
+                colors,
             );
         }
 
         let lines =
             self.render_visible_messages_without_selection_styling(max_width, model, colors);
-        crate::ui::selection::extract_selected_text(&lines, &self.selection)
+        crate::ui::selection::extract_selected_markdown(&lines, &self.selection, colors)
     }
 
     pub fn editor_location_for_selection(&self) -> Option<EditorLocation> {
