@@ -201,6 +201,41 @@ impl From<crate::aisdk::retry::RetryStatus> for StreamingRetryStatus {
     }
 }
 
+/// Startup agent for the interactive app.
+/// `--agent` wins, then the last primary agent the user selected, then config
+/// `default_agent`, then Build.
+pub(crate) fn resolve_interactive_startup_agent(
+    registry: &crate::agent::definition::AgentRegistry,
+    cli_agent: Option<&str>,
+    persisted_agent: Option<&str>,
+    default_agent: Option<&str>,
+) -> anyhow::Result<String> {
+    if let Some(name) = cli_agent.map(str::trim).filter(|name| !name.is_empty()) {
+        if registry.primary_agent(name).is_none() {
+            anyhow::bail!(
+                "Unknown agent '{}'. Available: {}",
+                name,
+                registry.visible_primary_agent_names().join(", ")
+            );
+        }
+        return Ok(titlecase_agent_name(name));
+    }
+
+    if let Some(name) = persisted_agent
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .filter(|name| registry.primary_agent(name).is_some())
+    {
+        return Ok(titlecase_agent_name(name));
+    }
+
+    Ok(default_agent
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| "Build".to_string()))
+}
+
 pub(crate) fn titlecase_agent_name(name: &str) -> String {
     let name = name.trim();
     if name.is_empty() {
@@ -1111,14 +1146,22 @@ impl App {
         } else {
             ("big-pickle".to_string(), "opencode".to_string())
         };
-        let agent = cli_agent
-            .map(str::trim)
-            .filter(|name| !name.is_empty())
-            .map(titlecase_agent_name)
-            .unwrap_or_else(|| "Build".to_string());
 
         // Resolve real theme before first paint (avoids builtin flash).
         let prefs_dao = crate::persistence::PrefsDAO::new().ok();
+        let persisted_agent = if cli_agent.map(str::trim).is_none_or(|name| name.is_empty()) {
+            prefs_dao
+                .as_ref()
+                .and_then(|dao| dao.get_active_agent().ok().flatten())
+        } else {
+            None
+        };
+        let agent = cli_agent
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .or(persisted_agent.as_deref())
+            .map(titlecase_agent_name)
+            .unwrap_or_else(|| "Build".to_string());
         let prefs_theme_id = prefs_dao
             .as_ref()
             .and_then(|dao| dao.get_active_theme().ok().flatten());
@@ -1352,22 +1395,15 @@ impl App {
             .with_skills(Self::skill_suggestions(&agent_registry)),
         );
 
-        let mut agent = self.agent.clone();
-        if let Some(default_agent) = loaded_config.merged_config.default_agent.clone() {
-            if !default_agent.trim().is_empty() && self.pending_cli_agent.is_none() {
-                agent = default_agent;
-            }
-        }
-        if let Some(name) = cli_agent.map(str::trim).filter(|name| !name.is_empty()) {
-            if agent_registry.primary_agent(name).is_none() {
-                anyhow::bail!(
-                    "Unknown agent '{}'. Available: {}",
-                    name,
-                    agent_registry.visible_primary_agent_names().join(", ")
-                );
-            }
-            agent = titlecase_agent_name(name);
-        }
+        let persisted_agent = prefs_dao
+            .as_ref()
+            .and_then(|dao| dao.get_active_agent().ok().flatten());
+        let agent = resolve_interactive_startup_agent(
+            &agent_registry,
+            cli_agent,
+            persisted_agent.as_deref(),
+            loaded_config.merged_config.default_agent.as_deref(),
+        )?;
 
         let (resolved_sounds, notification_warnings) =
             crate::sound::resolve_effective_sounds(&loaded_config.merged_config.notifications);
@@ -4874,6 +4910,11 @@ impl App {
         };
 
         self.agent = titlecase_agent_name(&definition.name);
+        if let Some(dao) = &self.prefs_dao {
+            if let Err(error) = dao.set_active_agent(&definition.name) {
+                crate::emit_log!("Failed to persist active agent preference: {}", error);
+            }
+        }
         let colors = self.get_current_theme_colors();
         let agent_color = crate::theme::agent_color(&self.agent, &colors);
         self.chat_state.wave_spinner.set_color(agent_color);
@@ -14551,6 +14592,68 @@ mod tests {
 
         app.handle_keys(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE));
         assert_eq!(app.agent, "Build");
+    }
+
+    #[test]
+    fn shift_tab_persists_agent_for_next_launch() {
+        let mut app = test_app();
+        app.prefs_dao = Some(crate::persistence::PrefsDAO::in_memory());
+
+        app.toggle_agent_mode();
+
+        assert_eq!(app.agent, "Plan");
+        assert_eq!(
+            app.prefs_dao
+                .as_ref()
+                .unwrap()
+                .get_active_agent()
+                .unwrap()
+                .as_deref(),
+            Some("plan")
+        );
+        assert_eq!(
+            resolve_interactive_startup_agent(
+                &app.agent_registry,
+                None,
+                Some("plan"),
+                Some("build"),
+            )
+            .unwrap(),
+            "Plan"
+        );
+    }
+
+    #[test]
+    fn startup_agent_prefers_cli_then_persisted_then_config() {
+        let registry = crate::agent::definition::AgentRegistry::default();
+
+        assert_eq!(
+            resolve_interactive_startup_agent(
+                &registry,
+                Some("plan"),
+                Some("build"),
+                Some("build")
+            )
+            .unwrap(),
+            "Plan"
+        );
+        assert_eq!(
+            resolve_interactive_startup_agent(&registry, None, Some("plan"), Some("build"))
+                .unwrap(),
+            "Plan"
+        );
+        assert_eq!(
+            resolve_interactive_startup_agent(&registry, None, Some("not-real"), Some("plan"))
+                .unwrap(),
+            "plan"
+        );
+        assert_eq!(
+            resolve_interactive_startup_agent(&registry, None, None, None).unwrap(),
+            "Build"
+        );
+        assert!(
+            resolve_interactive_startup_agent(&registry, Some("not-real"), None, None).is_err()
+        );
     }
 
     #[tokio::test]
