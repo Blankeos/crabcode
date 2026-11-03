@@ -7,7 +7,7 @@ use crate::tool::Tool;
 use async_trait::async_trait;
 use eventsource_stream::{EventStreamError, Eventsource};
 use futures::{SinkExt, StreamExt};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::error::Error as StdError;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -2359,50 +2359,59 @@ fn build_openai_messages(
 /// reuses an id fails with "Duplicate function_call_output". Remap each
 /// repeated call — and its matching output — to a unique id; ids are opaque.
 fn dedupe_responses_call_ids(mut items: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
+    let mut reserved_ids: HashSet<String> = items
+        .iter()
+        .filter_map(|item| item.get("call_id").and_then(|value| value.as_str()))
+        .map(str::to_string)
+        .collect();
+    let mut replacements: HashMap<(String, usize), String> = HashMap::new();
     // Occurrence k of a call_id pairs with occurrence k of its output, so
     // track counts per call_id instead of assuming strict call/output order.
     let mut call_occurrences: HashMap<String, usize> = HashMap::new();
     let mut output_occurrences: HashMap<String, usize> = HashMap::new();
 
     for item in items.iter_mut() {
-        match item.get("type").and_then(|value| value.as_str()) {
-            Some("function_call") => {
-                let Some(call_id) = item
-                    .get("call_id")
-                    .and_then(|value| value.as_str())
-                    .map(str::to_string)
-                else {
-                    continue;
-                };
-                let occurrence = call_occurrences.entry(call_id.clone()).or_insert(0);
-                *occurrence += 1;
-                if *occurrence == 1 {
-                    continue;
+        let is_call = match item.get("type").and_then(|value| value.as_str()) {
+            Some("function_call") => true,
+            Some("function_call_output") => false,
+            _ => continue,
+        };
+        let Some(call_id) = item
+            .get("call_id")
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        let occurrences = if is_call {
+            &mut call_occurrences
+        } else {
+            &mut output_occurrences
+        };
+        let occurrence = occurrences.entry(call_id.clone()).or_insert(0);
+        *occurrence += 1;
+        if *occurrence == 1 {
+            continue;
+        }
+        let new_id = replacements
+            .entry((call_id.clone(), *occurrence))
+            .or_insert_with(|| {
+                let mut suffix = *occurrence;
+                loop {
+                    let candidate = format!("{call_id}_dup{suffix}");
+                    if reserved_ids.insert(candidate.clone()) {
+                        break candidate;
+                    }
+                    suffix += 1;
                 }
-                let new_id = format!("{call_id}_dup{occurrence}");
-                item["call_id"] = serde_json::Value::String(new_id);
-                // The item id belongs to the original response; drop it so the
-                // rewritten pair cannot collide on item ids either.
-                if let Some(obj) = item.as_object_mut() {
-                    obj.remove("id");
-                }
+            });
+        item["call_id"] = serde_json::Value::String(new_id.clone());
+        // The item id belongs to the original response; drop it so the
+        // rewritten pair cannot collide on item ids either.
+        if is_call {
+            if let Some(obj) = item.as_object_mut() {
+                obj.remove("id");
             }
-            Some("function_call_output") => {
-                let Some(call_id) = item
-                    .get("call_id")
-                    .and_then(|value| value.as_str())
-                    .map(str::to_string)
-                else {
-                    continue;
-                };
-                let occurrence = output_occurrences.entry(call_id.clone()).or_insert(0);
-                *occurrence += 1;
-                if *occurrence > 1 {
-                    item["call_id"] =
-                        serde_json::Value::String(format!("{call_id}_dup{occurrence}"));
-                }
-            }
-            _ => {}
         }
     }
 
@@ -3027,6 +3036,50 @@ mod tests {
         );
         // Rewritten calls must not keep a stale response item id.
         assert!(input[3].get("id").is_none());
+    }
+
+    #[test]
+    fn dedupes_responses_call_ids_without_colliding_with_original_suffixes() {
+        let input = build_openai_messages(
+            &[
+                Message::tool_call("call_1", "read", "{}"),
+                Message::tool_output("call_1", "read", "first", false),
+                Message::tool_call_with_item_id("fc_repeated", "call_1", "read", "{}"),
+                Message::tool_call_with_item_id("fc_original", "call_1_dup2", "glob", "{}"),
+                Message::tool_call("call_2", "grep", "{}"),
+                Message::tool_output("call_2", "grep", "concurrent third", false),
+                Message::tool_output("call_1_dup2", "glob", "concurrent second", false),
+                Message::tool_output("call_1", "read", "concurrent first", false),
+                Message::tool_call("call_1", "read", "{}"),
+                Message::tool_output("call_1", "read", "last", false),
+            ],
+            false,
+            false,
+        );
+
+        let call_ids: Vec<&str> = input
+            .iter()
+            .map(|item| item["call_id"].as_str().expect("call_id"))
+            .collect();
+        assert_eq!(
+            call_ids,
+            [
+                "call_1",
+                "call_1",
+                "call_1_dup3",
+                "call_1_dup2",
+                "call_2",
+                "call_2",
+                "call_1_dup2",
+                "call_1_dup3",
+                "call_1_dup4",
+                "call_1_dup4",
+            ]
+        );
+        assert!(input[2].get("id").is_none());
+        assert_eq!(input[3]["id"], "fc_original");
+        assert_eq!(input[6]["output"], "concurrent second");
+        assert_eq!(input[7]["output"], "concurrent first");
     }
 
     #[test]
