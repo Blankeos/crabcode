@@ -1,8 +1,9 @@
 use crate::theme::ThemeColors;
+use crate::ui::components::dialog::dim_backdrop;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, MouseEvent};
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
-    style::{Color, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Clear, Paragraph},
     Frame,
@@ -142,31 +143,36 @@ pub fn render_session_rename_dialog(
     }
 
     const DIALOG_WIDTH: u16 = 60;
-    const DIALOG_HEIGHT: u16 = 10;
+    // Title, gap, one-line name, gap, footer. Taller than that just pads empty rows.
+    const DIALOG_HEIGHT: u16 = 7;
+    const PADDING_X: u16 = 3;
+    const PADDING_Y: u16 = 1;
 
     let dialog_width = area.width.min(DIALOG_WIDTH);
     let dialog_height = area.height.min(DIALOG_HEIGHT);
 
     dialog_state.dialog_area = Rect {
-        x: (area.width - dialog_width) / 2,
-        y: (area.height - dialog_height) / 2,
+        x: (area.width.saturating_sub(dialog_width)) / 2,
+        y: (area.height.saturating_sub(dialog_height)) / 2,
         width: dialog_width,
         height: dialog_height,
     };
 
+    dim_backdrop(f, area, dialog_state.dialog_area);
     f.render_widget(Clear, dialog_state.dialog_area);
 
-    const PADDING: u16 = 3;
     dialog_state.content_area = Rect {
-        x: dialog_state.dialog_area.x + PADDING,
-        y: dialog_state.dialog_area.y + PADDING,
-        width: dialog_state.dialog_area.width.saturating_sub(PADDING * 2),
-        height: dialog_state.dialog_area.height.saturating_sub(PADDING * 2),
+        x: dialog_state.dialog_area.x + PADDING_X,
+        y: dialog_state.dialog_area.y + PADDING_Y,
+        width: dialog_state.dialog_area.width.saturating_sub(PADDING_X * 2),
+        height: dialog_state
+            .dialog_area
+            .height
+            .saturating_sub(PADDING_Y * 2),
     };
 
     f.render_widget(
-        ratatui::widgets::Paragraph::new("")
-            .style(ratatui::style::Style::default().bg(colors.dialog_background)),
+        Paragraph::new("").style(Style::default().bg(colors.dialog_background)),
         dialog_state.dialog_area,
     );
 
@@ -176,40 +182,49 @@ pub fn render_session_rename_dialog(
             Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(1),
-            Constraint::Length(3),
+            Constraint::Length(1),
             Constraint::Length(1),
         ])
         .split(dialog_state.content_area);
 
-    let title_line = Line::from(vec![
-        Span::styled(
+    let esc_text = "esc";
+    let esc_area_width = (esc_text.len() as u16).saturating_add(1);
+    let header_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(0), Constraint::Length(esc_area_width)])
+        .split(chunks[0]);
+
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
             "Rename session",
             Style::default()
                 .fg(colors.text)
-                .add_modifier(ratatui::style::Modifier::BOLD),
-        ),
-        Span::raw(" "),
-        Span::styled(
-            "esc",
+                .add_modifier(Modifier::BOLD),
+        )))
+        .alignment(Alignment::Left),
+        header_chunks[0],
+    );
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            esc_text,
             Style::default()
                 .fg(colors.primary)
-                .add_modifier(ratatui::style::Modifier::BOLD),
-        ),
-    ]);
-
-    let title_paragraph = Paragraph::new(title_line).alignment(Alignment::Left);
-    f.render_widget(title_paragraph, chunks[0]);
+                .add_modifier(Modifier::BOLD),
+        )))
+        .alignment(Alignment::Right),
+        header_chunks[1],
+    );
 
     // Single caret: hardware cursor below is source of truth; suppress
     // fake block so emoji can't show two split carets.
     dialog_state
         .input_textarea
         .set_cursor_style(Style::default());
-    f.render_widget(&dialog_state.input_textarea, chunks[3]);
+    f.render_widget(&dialog_state.input_textarea, chunks[2]);
 
     // Hardware cursor follows the text field so terminal cursor effects
     // (e.g. ghostty shaders) and IME popups track typing.
-    if chunks[3].width > 0 && chunks[3].height > 0 {
+    if chunks[2].width > 0 && chunks[2].height > 0 {
         use unicode_width::UnicodeWidthStr;
         let (row, col) = dialog_state.input_textarea.cursor();
         let line = dialog_state
@@ -219,24 +234,31 @@ pub fn render_session_rename_dialog(
             .cloned()
             .unwrap_or_default();
         let prefix: String = line.chars().take(col).collect();
-        let x = chunks[3]
+        let x = chunks[2]
             .x
-            .saturating_add((prefix.width() as u16).min(chunks[3].width.saturating_sub(1)));
-        let y = chunks[3]
+            .saturating_add((prefix.width() as u16).min(chunks[2].width.saturating_sub(1)));
+        let y = chunks[2]
             .y
-            .saturating_add((row as u16).min(chunks[3].height.saturating_sub(1)));
+            .saturating_add((row as u16).min(chunks[2].height.saturating_sub(1)));
         f.set_cursor_position((x, y));
     }
 
-    let footer_line = Line::from(vec![Span::styled(
-        "enter submit",
-        Style::default()
-            .fg(colors.text_weak)
-            .add_modifier(ratatui::style::Modifier::DIM),
-    )]);
-
-    let footer_paragraph = Paragraph::new(footer_line).alignment(Alignment::Left);
-    f.render_widget(footer_paragraph, chunks[4]);
+    let footer_line = Line::from(vec![
+        Span::styled(
+            "submit",
+            Style::default()
+                .fg(colors.primary)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled(
+            "enter",
+            Style::default()
+                .fg(colors.text_weak)
+                .add_modifier(Modifier::DIM),
+        ),
+    ]);
+    f.render_widget(Paragraph::new(footer_line), chunks[4]);
 }
 
 pub fn handle_session_rename_dialog_key_event(
