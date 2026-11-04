@@ -1091,6 +1091,19 @@ impl Input {
         self.clear_selection_drag_state();
     }
 
+    /// Erase the active selection, same as Backspace while text is highlighted.
+    pub fn delete_selection(&mut self) -> bool {
+        if !self.has_selection() {
+            return false;
+        }
+        self.reveal_cursor_after_key_input();
+        self.preferred_visual_col = None;
+        self.textarea.delete_char();
+        self.sync_image_placeholders();
+        self.sync_pending_pastes();
+        true
+    }
+
     /// Screen Y of the first selected visual row inside the textarea, if any.
     pub fn selection_screen_row(&self) -> Option<u16> {
         let area = self.textarea_area?;

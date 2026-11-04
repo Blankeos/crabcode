@@ -537,6 +537,7 @@ struct SelectionActionBarState {
 enum SelectionAction {
     AddToPrompt,
     Copy,
+    Cut,
     OpenInEditor,
     Dismiss,
 }
@@ -3502,6 +3503,22 @@ impl App {
         false
     }
 
+    fn try_cut_selection(&mut self) -> bool {
+        if !self.input.has_selection() {
+            return false;
+        }
+
+        let text = self.input.get_selected_text();
+        if text.is_empty() {
+            return false;
+        }
+        let _ = crate::utils::clipboard::copy_text(&text);
+        self.input.delete_selection();
+        self.selection_action_bar = None;
+        push_toast(Toast::new("Cut to clipboard", ToastLevel::Info, None));
+        true
+    }
+
     fn clear_selection(&mut self) -> bool {
         self.selection_action_bar = None;
         if self.chat_state.chat.has_selection() {
@@ -3684,6 +3701,13 @@ impl App {
         match key.code {
             KeyCode::Char('y') if key.modifiers == event::KeyModifiers::NONE => {
                 let _ = self.try_copy_selection();
+                true
+            }
+            KeyCode::Char('x')
+                if key.modifiers == event::KeyModifiers::NONE
+                    && state.target == SelectionActionTarget::Input =>
+            {
+                let _ = self.try_cut_selection();
                 true
             }
             KeyCode::Char('i')
@@ -5324,6 +5348,10 @@ impl App {
                     SelectionAction::AddToPrompt => self.add_selection_to_prompt(state.target),
                     SelectionAction::Copy => {
                         let _ = self.try_copy_selection();
+                        true
+                    }
+                    SelectionAction::Cut => {
+                        let _ = self.try_cut_selection();
                         true
                     }
                     SelectionAction::OpenInEditor => self.open_selection_in_editor(),
@@ -13413,7 +13441,9 @@ const CHAT_SELECTION_ACTION_ADD_TO_PROMPT_COL: usize = 8;
 const CHAT_SELECTION_ACTION_OPEN_IN_EDITOR_COL: usize = 24;
 const CHAT_SELECTION_ACTION_ESC_COL: usize = 43;
 const CHAT_SELECTION_ACTION_ESC_COL_NO_EDITOR: usize = 24;
-const INPUT_SELECTION_ACTION_ESC_COL: usize = 8;
+const INPUT_SELECTION_ACTION_CUT_COL: usize = 8;
+const INPUT_SELECTION_ACTION_ESC_COL: usize = 14;
+const JOBS_SELECTION_ACTION_ESC_COL: usize = 8;
 
 fn selection_action_for_column(state: SelectionActionBarState, column: usize) -> SelectionAction {
     match state.target {
@@ -13434,14 +13464,17 @@ fn selection_action_for_column(state: SelectionActionBarState, column: usize) ->
             SelectionAction::Dismiss
         }
         SelectionActionTarget::Chat => SelectionAction::Dismiss,
-        SelectionActionTarget::Input | SelectionActionTarget::JobsDetail
-            if column < INPUT_SELECTION_ACTION_ESC_COL =>
-        {
+        SelectionActionTarget::Input if column < INPUT_SELECTION_ACTION_CUT_COL => {
             SelectionAction::Copy
         }
-        SelectionActionTarget::Input | SelectionActionTarget::JobsDetail => {
-            SelectionAction::Dismiss
+        SelectionActionTarget::Input if column < INPUT_SELECTION_ACTION_ESC_COL => {
+            SelectionAction::Cut
         }
+        SelectionActionTarget::Input => SelectionAction::Dismiss,
+        SelectionActionTarget::JobsDetail if column < JOBS_SELECTION_ACTION_ESC_COL => {
+            SelectionAction::Copy
+        }
+        SelectionActionTarget::JobsDetail => SelectionAction::Dismiss,
     }
 }
 
@@ -13502,9 +13535,8 @@ fn selection_action_bar_width(state: SelectionActionBarState) -> u16 {
     match state.target {
         SelectionActionTarget::Chat if state.can_open_in_editor => SELECTION_ACTION_BAR_WIDTH,
         SelectionActionTarget::Chat => CHAT_SELECTION_ACTION_ESC_COL_NO_EDITOR as u16 + 4,
-        SelectionActionTarget::Input | SelectionActionTarget::JobsDetail => {
-            INPUT_SELECTION_ACTION_ESC_COL as u16 + 4
-        }
+        SelectionActionTarget::Input => INPUT_SELECTION_ACTION_ESC_COL as u16 + 4,
+        SelectionActionTarget::JobsDetail => JOBS_SELECTION_ACTION_ESC_COL as u16 + 4,
     }
 }
 
@@ -13581,6 +13613,16 @@ fn render_selection_action_bar(
         spans.push(Span::styled("esc", key_style));
         spans.push(Span::raw(" "));
         Line::from(spans)
+    } else if state.target == SelectionActionTarget::Input {
+        Line::from(vec![
+            Span::raw(" "),
+            Span::styled("y", key_style),
+            Span::styled(" copy ", label_style),
+            Span::styled("x", key_style),
+            Span::styled(" cut ", label_style),
+            Span::styled("esc", key_style),
+            Span::raw(" "),
+        ])
     } else {
         Line::from(vec![
             Span::raw(" "),
@@ -15452,8 +15494,9 @@ mod tests {
             SelectionAction::Dismiss
         );
         assert_eq!(selection_action_for_column(input, 1), SelectionAction::Copy);
+        assert_eq!(selection_action_for_column(input, 8), SelectionAction::Cut);
         assert_eq!(
-            selection_action_for_column(input, 8),
+            selection_action_for_column(input, 14),
             SelectionAction::Dismiss
         );
     }
@@ -15522,6 +15565,34 @@ mod tests {
         assert_eq!(app.input.get_text(), "`alpha`");
         assert!(app.selection_action_bar.is_none());
         assert!(!app.chat_state.chat.has_selection());
+    }
+
+    #[test]
+    fn input_selection_x_cuts_selected_text() {
+        let mut app = test_app();
+        app.base_focus = BaseFocus::Chat;
+        app.last_frame_size = ratatui::layout::Rect::new(0, 0, 80, 24);
+        app.input.set_text("alpha beta");
+        app.input
+            .set_textarea_area_for_test(ratatui::layout::Rect::new(2, 20, 20, 1));
+
+        assert!(app.handle_input_mouse_event(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            2,
+            20
+        )));
+        assert!(app.handle_input_mouse_event(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            7,
+            20
+        )));
+        assert_eq!(app.input.get_selected_text(), "alpha");
+
+        app.handle_keys(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+
+        assert_eq!(app.input.get_text(), " beta");
+        assert!(!app.input.has_selection());
+        assert!(app.selection_action_bar.is_none());
     }
 
     #[test]
@@ -15612,7 +15683,7 @@ mod tests {
             app.selection_action_bar.map(|state| state.target),
             Some(SelectionActionTarget::Input)
         );
-        assert_eq!(app.current_selection_action_bar_area().unwrap().width, 12);
+        assert_eq!(app.current_selection_action_bar_area().unwrap().width, 18);
 
         let action_area = app.current_selection_action_bar_area().unwrap();
         app.handle_mouse_event(mouse(
