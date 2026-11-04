@@ -589,7 +589,9 @@ fn is_local_path_like(path_text: &str) -> bool {
         return is_relative_slash_path(path_text);
     }
 
-    is_known_local_filename(path_text) || has_known_extension(path_text)
+    is_known_local_filename(path_text)
+        || has_known_extension(path_text)
+        || is_existing_dot_path(path_text)
 }
 
 fn is_forbidden_path_char(ch: char) -> bool {
@@ -602,14 +604,14 @@ fn is_absolute_path_like(path_text: &str) -> bool {
         .filter(|segment| !segment.is_empty())
         .collect::<Vec<_>>();
 
-    if segments.len() < 2 && !std::path::Path::new(path_text).exists() {
-        return false;
+    // `/connect` and `/tmp` are not paths. A real file at `/README.md` still is.
+    if segments.len() < 2 {
+        return std::path::Path::new(path_text).is_file();
     }
 
-    // Don't mark directories as clickable
     let path = std::path::Path::new(path_text);
     if path.exists() {
-        return path.is_file();
+        return is_clickable_filesystem_entry(path);
     }
 
     true
@@ -626,9 +628,9 @@ fn is_relative_slash_path(path_text: &str) -> bool {
             .first()
             .and_then(|segment| segment.chars().next())
             .is_some_and(|ch| ch.is_ascii_alphabetic() || matches!(ch, '.' | '_'))
-        && segments.iter().all(|segment| {
-            *segment != "." && *segment != ".." && segment.chars().all(is_path_segment_char)
-        });
+        && segments
+            .iter()
+            .all(|segment| segment.chars().all(is_path_segment_char));
 
     if !syntactically_path_like {
         return false;
@@ -642,7 +644,23 @@ fn is_relative_slash_path(path_text: &str) -> bool {
         return true;
     }
 
-    expand_local_path(path_text).is_some_and(|path| path.is_file())
+    // Folders have no extension (`src/persistence`, `_docs/config`, `src/mcp/../aisdk`).
+    expand_local_path(path_text).is_some_and(|path| is_clickable_filesystem_entry(&path))
+}
+
+fn is_clickable_filesystem_entry(path: &std::path::Path) -> bool {
+    path.is_file() || path.is_dir()
+}
+
+/// `.crabcode` has no slash and no known extension, but it is a real directory.
+fn is_existing_dot_path(path_text: &str) -> bool {
+    let Some(name) = path_text.strip_prefix('.') else {
+        return false;
+    };
+    if name.is_empty() || name.starts_with('.') || !name.chars().all(is_path_segment_char) {
+        return false;
+    }
+    is_clickable_filesystem_entry(std::path::Path::new(path_text))
 }
 
 fn is_path_segment_char(ch: char) -> bool {
@@ -788,6 +806,35 @@ mod tests {
             "streaming at 42t/s, ratio=1/2, non-selectable/unhighlighted, /connect"
         )
         .is_empty());
+        assert!(detected_texts("scratch in /tmp and missing/nope-dir-xyz").is_empty());
+    }
+
+    #[test]
+    fn detects_existing_directory_paths() {
+        let cwd = std::env::current_dir().unwrap();
+        let absolute = [cwd.join("src"), cwd.join("src/mcp"), cwd.join("_docs")];
+        let mut samples = absolute
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        samples.extend([
+            "src/persistence".to_string(),
+            ".crabcode".to_string(),
+            "_docs/config".to_string(),
+            "src/mcp/../aisdk".to_string(),
+        ]);
+
+        for sample in samples {
+            assert!(
+                std::path::Path::new(&sample).is_dir(),
+                "fixture is not a directory: {sample}"
+            );
+            assert_eq!(
+                detected_texts(&format!("open {sample} please")),
+                vec![sample.clone()],
+                "expected directory path to be clickable: {sample}"
+            );
+        }
     }
 
     #[test]
