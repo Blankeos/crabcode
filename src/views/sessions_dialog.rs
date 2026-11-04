@@ -1,12 +1,18 @@
-use crate::theme::ThemeColors;
+use crate::theme::{contrast_text, ThemeColors};
 use crate::ui::components::dialog::{
-    Dialog, DialogAction as FooterAction, DialogItem, DialogPosition,
+    dim_backdrop, Dialog, DialogAction as FooterAction, DialogItem, DialogPosition,
 };
 use ratatui::crossterm::event::{
     KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
-use ratatui::{layout::Rect, Frame};
+use ratatui::{
+    layout::Rect,
+    style::{Modifier, Style},
+    text::{Line, Span},
+    Frame,
+};
 use std::collections::HashMap;
+use unicode_width::UnicodeWidthStr;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionsDialogFilter {
@@ -309,8 +315,11 @@ pub fn render_sessions_dialog(
     }
     dialog_state.dialog.render(f, area, colors);
     if let Some(menu) = dialog_state.item_menu.clone() {
+        let sessions_area = dialog_state.dialog.dialog_area;
+        // Options take focus: dim the sessions list (left) the same way a dialog dims its backdrop.
+        dim_backdrop(f, sessions_area, Rect::default());
         let delete_armed = dialog_state.pending_delete.as_ref() == Some(&menu.session_id);
-        render_item_menu(f, &menu, delete_armed, area, colors);
+        render_item_menu(f, &menu, delete_armed, area, sessions_area, colors);
     }
 }
 
@@ -793,11 +802,69 @@ fn handle_item_menu_key_event(
     }
 }
 
+fn item_menu_footer(colors: ThemeColors) -> Line<'static> {
+    let label = Style::default()
+        .fg(colors.primary)
+        .add_modifier(Modifier::BOLD);
+    let key = Style::default()
+        .fg(colors.text_weak)
+        .add_modifier(Modifier::DIM);
+    let mut spans = Vec::new();
+    for (index, (name, shortcut)) in [("navigate", "↑↓"), ("run", "enter"), ("close", "esc")]
+        .into_iter()
+        .enumerate()
+    {
+        if index > 0 {
+            spans.push(Span::raw("  "));
+        }
+        spans.push(Span::styled(name, label));
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(shortcut, key));
+    }
+    Line::from(spans)
+}
+
+fn item_menu_footer_width() -> usize {
+    "navigate".width()
+        + 2
+        + "↑↓".width()
+        + 2
+        + "run".width()
+        + 2
+        + "enter".width()
+        + 2
+        + "close".width()
+        + 2
+        + "esc".width()
+}
+
+/// Sit in the space to the right of the sessions list when it fits, so the dimmed
+/// list stays visible. Otherwise center over the screen.
+fn item_menu_popup_area(screen: Rect, sessions: Rect, width: u16, height: u16) -> Rect {
+    let width = width.min(screen.width).max(1);
+    let height = height.min(screen.height).max(1);
+    let right = sessions.right().clamp(screen.left(), screen.right());
+    let room = screen.right().saturating_sub(right);
+    let x = if sessions.width > 0 && room >= width {
+        right + room.saturating_sub(width) / 2
+    } else {
+        screen.x + screen.width.saturating_sub(width) / 2
+    };
+    let y = screen.y + screen.height.saturating_sub(height) / 2;
+    Rect {
+        x,
+        y,
+        width,
+        height,
+    }
+}
+
 fn render_item_menu(
     f: &mut Frame,
     menu: &SessionsItemMenu,
     delete_armed: bool,
     area: Rect,
+    sessions_area: Rect,
     colors: ThemeColors,
 ) {
     use ratatui::{
@@ -836,19 +903,21 @@ fn render_item_menu(
         })
         .max()
         .unwrap_or(0);
-    // Marker + key chip + label + optional " (reason)".
-    let content_width = 2 + 5 + 1 + label_width + reason_width;
+    // Key letter + label + optional " (reason)". Letters stay as shortcuts.
+    let content_width = 4 + label_width + reason_width;
     let title = format!("Options · {}", menu.session_title);
-    let footer = "↑↓ navigate · enter run · esc close";
+    let footer_width = item_menu_footer_width();
 
-    let popup_width = (content_width + 6).min(area.width as usize).max(20) as u16;
-    let popup_height = (rows.len() + 6).min(area.height as usize).max(7) as u16;
-    let popup_area = Rect {
-        x: area.x + area.width.saturating_sub(popup_width) / 2,
-        y: area.y + area.height.saturating_sub(popup_height) / 2,
-        width: popup_width,
-        height: popup_height,
+    let natural_width = (content_width.max(footer_width) + 6).max(20);
+    let right = sessions_area.right().clamp(area.left(), area.right());
+    let room = area.right().saturating_sub(right) as usize;
+    let popup_width = if sessions_area.width > 0 && room >= 28 {
+        natural_width.min(room).max(28).min(area.width as usize) as u16
+    } else {
+        natural_width.min(area.width as usize).max(20) as u16
     };
+    let popup_height = (rows.len() + 6).min(area.height as usize).max(7) as u16;
+    let popup_area = item_menu_popup_area(area, sessions_area, popup_width, popup_height);
 
     f.render_widget(Clear, popup_area);
     f.render_widget(
@@ -900,73 +969,67 @@ fn render_item_menu(
         chunks[0],
     );
 
-    let mut lines: Vec<Line> = Vec::new();
+    let list_area = chunks[2];
     for (index, (entry, label, enabled, reason)) in rows.iter().enumerate() {
-        let is_selected = index == menu.selected;
-        let marker = if is_selected { "▸ " } else { "  " };
-        let key_text = format!(" {} ", entry.shortcut());
-
-        if *enabled {
-            let marker_style = if is_selected {
-                Style::default()
-                    .fg(colors.primary)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(colors.text_weak)
-            };
-            let label_style = if is_selected {
-                Style::default()
-                    .fg(colors.text)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(colors.text)
-            };
-            let padding = " ".repeat(label_width.saturating_sub(label.width()));
-            lines.push(Line::from(vec![
-                Span::styled(marker, marker_style),
-                Span::styled(
-                    key_text,
-                    Style::default()
-                        .fg(colors.primary)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(" "),
-                Span::styled(label.clone(), label_style),
-                Span::raw(padding),
-            ]));
-        } else {
-            let disabled_style = Style::default()
-                .fg(colors.text_weak)
-                .add_modifier(Modifier::DIM | Modifier::CROSSED_OUT);
-            let padding = " ".repeat(label_width.saturating_sub(label.width()));
-            let mut spans = vec![
-                Span::styled(marker, Style::default().fg(colors.text_weak)),
-                Span::styled(key_text, Style::default().fg(colors.text_weak)),
-                Span::raw(" "),
-                Span::styled(label.clone(), disabled_style),
-                Span::raw(padding),
-            ];
-            if let Some(reason) = reason {
-                spans.push(Span::styled(
-                    format!(" ({reason})"),
-                    Style::default()
-                        .fg(colors.text_weak)
-                        .add_modifier(Modifier::DIM),
-                ));
-            }
-            lines.push(Line::from(spans));
+        if index as u16 >= list_area.height {
+            break;
         }
-    }
-    f.render_widget(Paragraph::new(lines).alignment(Alignment::Left), chunks[2]);
-
-    f.render_widget(
-        Paragraph::new(Line::from(vec![Span::styled(
-            footer,
+        let is_selected = index == menu.selected && *enabled;
+        let key_text = format!(" {} ", entry.shortcut());
+        let key_style = if is_selected {
+            Style::default().add_modifier(Modifier::BOLD)
+        } else if *enabled {
+            Style::default()
+                .fg(colors.primary)
+                .add_modifier(Modifier::BOLD)
+        } else {
             Style::default()
                 .fg(colors.text_weak)
-                .add_modifier(Modifier::DIM),
-        )]))
-        .alignment(Alignment::Left),
+                .add_modifier(Modifier::DIM)
+        };
+        let label_style = if is_selected {
+            Style::default().add_modifier(Modifier::BOLD)
+        } else if *enabled {
+            Style::default().fg(colors.text)
+        } else {
+            Style::default()
+                .fg(colors.text_weak)
+                .add_modifier(Modifier::DIM | Modifier::CROSSED_OUT)
+        };
+        let mut spans = vec![
+            Span::styled(key_text, key_style),
+            Span::raw(" "),
+            Span::styled(label.clone(), label_style),
+        ];
+        if let (false, Some(reason)) = (*enabled, reason) {
+            spans.push(Span::styled(
+                format!(" ({reason})"),
+                Style::default()
+                    .fg(colors.text_weak)
+                    .add_modifier(Modifier::DIM),
+            ));
+        }
+
+        let mut row_style = Style::default().bg(colors.dialog_background);
+        if is_selected {
+            let bg = if delete_armed && *entry == ItemMenuEntry::Delete {
+                colors.error
+            } else {
+                colors.primary
+            };
+            row_style = Style::default().fg(contrast_text(bg)).bg(bg);
+        }
+        let row_area = Rect {
+            x: list_area.x,
+            y: list_area.y + index as u16,
+            width: list_area.width,
+            height: 1,
+        };
+        f.render_widget(Paragraph::new(Line::from(spans)).style(row_style), row_area);
+    }
+
+    f.render_widget(
+        Paragraph::new(item_menu_footer(colors)).alignment(Alignment::Left),
         chunks[4],
     );
 }
