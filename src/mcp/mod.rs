@@ -36,6 +36,8 @@ pub struct McpServerView {
     pub status: String,
     pub kind: String,
     pub detail: Option<String>,
+    pub tool_count: usize,
+    pub capabilities: String,
 }
 
 #[derive(Debug, Clone)]
@@ -57,6 +59,7 @@ struct McpServerState {
     status: McpStatus,
     client: Option<RunningService<RoleClient, ()>>,
     tools: Vec<McpToolSpec>,
+    capabilities: String,
 }
 
 #[derive(Debug, Clone)]
@@ -127,6 +130,7 @@ impl McpManager {
                     config: server_config,
                     client: None,
                     tools: Vec::new(),
+                    capabilities: String::new(),
                 },
             );
         }
@@ -157,6 +161,16 @@ impl McpManager {
                 status: state.status.as_str().to_string(),
                 kind: state.config.kind().to_string(),
                 detail: state.status.detail(),
+                tool_count: if matches!(state.status, McpStatus::Connected) {
+                    state.tools.len()
+                } else {
+                    0
+                },
+                capabilities: if matches!(state.status, McpStatus::Connected) {
+                    state.capabilities.clone()
+                } else {
+                    String::new()
+                },
             })
             .collect()
     }
@@ -167,6 +181,18 @@ impl McpManager {
             .filter(|state| state.config.enabled())
             .flat_map(|state| state.tools.clone())
             .collect()
+    }
+
+    /// Drop a live session after stored OAuth credentials are removed.
+    pub fn drop_auth_sync(&mut self, name: &str) {
+        let Some(state) = self.servers.get_mut(name) else {
+            return;
+        };
+        state.client = None;
+        state.tools.clear();
+        if state.config.enabled() {
+            state.status = McpStatus::NeedsAuth;
+        }
     }
 
     /// Drop a server from the live tool list immediately (TUI `/mcp` toggle off).
@@ -235,6 +261,7 @@ impl McpManager {
                             config: server_config,
                             client: None,
                             tools: Vec::new(),
+                            capabilities: String::new(),
                         },
                     );
                 }
@@ -430,6 +457,7 @@ async fn warm_connections(manager: Arc<Mutex<McpManager>>) {
 fn apply_connect_result(state: &mut McpServerState, result: ConnectOutcome) {
     match result {
         Ok((client, tools)) => {
+            state.capabilities = capability_summary(&client);
             state.tools = tools;
             state.client = Some(client);
             state.status = McpStatus::Connected;
@@ -437,6 +465,7 @@ fn apply_connect_result(state: &mut McpServerState, result: ConnectOutcome) {
         Err(status) => {
             state.client = None;
             state.tools.clear();
+            state.capabilities.clear();
             state.status = status;
         }
     }
@@ -563,6 +592,53 @@ fn remote_headers(remote: &McpRemoteConfig) -> anyhow::Result<HashMap<HeaderName
     Ok(headers)
 }
 
+pub fn auth_status(name: &str, config: &McpServerConfig) -> &'static str {
+    let McpServerConfig::Remote(remote) = config else {
+        return "not required";
+    };
+    if oauth::should_use_oauth(remote) {
+        return match credentials::credential_status(name, &remote.url) {
+            credentials::CredentialStatus::Authenticated => "authenticated",
+            credentials::CredentialStatus::Expired => "expired",
+            credentials::CredentialStatus::NeedsAuth => "needs authentication",
+        };
+    }
+    if remote
+        .headers
+        .keys()
+        .any(|key| key.eq_ignore_ascii_case("authorization"))
+    {
+        "header"
+    } else {
+        "not required"
+    }
+}
+
+fn capability_summary(client: &RunningService<RoleClient, ()>) -> String {
+    let Some(info) = client.peer_info() else {
+        return String::new();
+    };
+    let caps = &info.capabilities;
+    let mut parts = Vec::new();
+    if caps.tools.is_some() {
+        parts.push("tools");
+    }
+    if caps.resources.is_some() {
+        parts.push("resources");
+    }
+    if caps.prompts.is_some() {
+        parts.push("prompts");
+    }
+    if caps.completions.is_some() {
+        parts.push("completions");
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        parts.join(" · ")
+    }
+}
+
 fn toast_needs_auth(name: &str) {
     static TOASTED: OnceLock<std::sync::Mutex<HashSet<String>>> = OnceLock::new();
     let toasted = TOASTED.get_or_init(|| std::sync::Mutex::new(HashSet::new()));
@@ -571,7 +647,9 @@ fn toast_needs_auth(name: &str) {
         return;
     }
     crate::push_toast(crate::toast::Toast::new(
-        format!("MCP \"{name}\" needs authentication. Run: crabcode mcp auth {name}"),
+        format!(
+            "MCP \"{name}\" needs authentication. /mcp, enter, Reauthenticate — or: crabcode mcp auth {name}"
+        ),
         crate::toast::ToastLevel::Warning,
         Some(Duration::from_secs(8)),
     ));
@@ -968,6 +1046,7 @@ mod tests {
                     McpStatus::Disabled
                 },
                 client: None,
+                capabilities: "tools".to_string(),
                 tools: vec![McpToolSpec {
                     server: server.to_string(),
                     name: "browser".to_string(),

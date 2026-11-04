@@ -210,6 +210,30 @@ pub async fn authenticate_with_url_callback(
     .await
 }
 
+/// Like [`authenticate`], but the caller decides when the browser opens.
+///
+/// `on_url` runs as soon as the authorization link exists. `open_browser`
+/// resolves to `true` when the default browser should open. Resolving `false`
+/// (or dropping the wait) leaves the callback listener running so a copied link
+/// can still finish the login.
+pub async fn authenticate_with_browser_gate(
+    name: &str,
+    remote: &McpRemoteConfig,
+    on_url: impl FnOnce(String) + Send,
+    open_browser: impl Future<Output = bool> + Send,
+) -> Result<()> {
+    authenticate_with_url_action(name, remote, move |url| {
+        let url = url.to_string();
+        on_url(url.clone());
+        async move {
+            if open_browser.await {
+                let _ = crate::utils::file_opener::open_url(&url);
+            }
+        }
+    })
+    .await
+}
+
 async fn authenticate_with_url_action<F: Future<Output = ()>>(
     name: &str,
     remote: &McpRemoteConfig,

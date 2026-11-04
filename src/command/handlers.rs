@@ -1149,7 +1149,7 @@ pub fn register_all_commands(registry: &mut Registry) {
 
     registry.register(Command {
         name: "mcp".to_string(),
-        description: "List MCP servers (/mcp auth <name> to authenticate)".to_string(),
+        description: "Manage MCP servers (space toggles, enter for auth)".to_string(),
         handler: handle_mcp,
         hidden_tokens: vec![],
         chat_only: false,
