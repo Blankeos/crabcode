@@ -23,9 +23,15 @@ pub enum FileActionEvent {
     Choose(FileAction),
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LinkActionTarget {
+    File(FileHyperlinkTarget),
+    Url(String),
+}
+
 #[derive(Clone, Debug)]
 pub struct FileActions {
-    pub target: FileHyperlinkTarget,
+    pub target: LinkActionTarget,
     anchor: Position,
     selected: usize,
 }
@@ -40,42 +46,78 @@ pub fn reveal_label() -> &'static str {
     }
 }
 
+const FILE_MENU: [FileAction; 3] = [FileAction::Open, FileAction::Reveal, FileAction::Copy];
+const URL_MENU: [FileAction; 2] = [FileAction::Open, FileAction::Copy];
+
 impl FileActions {
     pub fn new(target: FileHyperlinkTarget, anchor: Position) -> Self {
         Self {
-            target,
+            target: LinkActionTarget::File(target),
             anchor,
             selected: 0,
         }
     }
 
+    pub fn for_url(url: String, anchor: Position) -> Self {
+        Self {
+            target: LinkActionTarget::Url(url),
+            anchor,
+            selected: 0,
+        }
+    }
+
+    pub fn file_target(&self) -> Option<&FileHyperlinkTarget> {
+        match &self.target {
+            LinkActionTarget::File(target) => Some(target),
+            LinkActionTarget::Url(_) => None,
+        }
+    }
+
     /// Clipboard payload deliberately excludes editor-only line/column suffixes.
     pub fn copy_payload(&self) -> String {
-        self.target.path.to_string_lossy().into_owned()
+        match &self.target {
+            LinkActionTarget::File(target) => target.path.to_string_lossy().into_owned(),
+            LinkActionTarget::Url(url) => url.clone(),
+        }
     }
 
-    fn labels() -> [(&'static str, &'static str); 3] {
-        [
-            ("o", "Open"),
-            ("r", reveal_label()),
-            ("y", "Copy absolute path"),
-        ]
+    pub fn actions(&self) -> &'static [FileAction] {
+        match self.target {
+            LinkActionTarget::File(_) => &FILE_MENU,
+            LinkActionTarget::Url(_) => &URL_MENU,
+        }
     }
 
-    fn actions() -> [FileAction; 3] {
-        [FileAction::Open, FileAction::Reveal, FileAction::Copy]
+    fn labels(&self) -> Vec<(&'static str, &'static str)> {
+        match self.target {
+            LinkActionTarget::File(_) => vec![
+                ("o", "Open"),
+                ("r", reveal_label()),
+                ("y", "Copy absolute path"),
+            ],
+            LinkActionTarget::Url(_) => vec![("o", "Open"), ("y", "Copy URL")],
+        }
+    }
+
+    fn choose_if_present(&self, action: FileAction) -> FileActionEvent {
+        if self.actions().contains(&action) {
+            FileActionEvent::Choose(action)
+        } else {
+            FileActionEvent::None
+        }
     }
 
     // Use rows instead of a long single line so each action stays reachable on
     // narrow terminals. Shortcuts and the focused row share the selection-bar styling.
     pub fn area(&self, screen: Rect) -> Rect {
-        let width = Self::labels()
+        let width = self
+            .labels()
             .iter()
             .map(|(_, label)| label.len() as u16 + 4)
             .max()
             .unwrap_or(0)
             .min(screen.width);
-        let height = 3.min(screen.height);
+        let height = (self.actions().len() as u16).min(screen.height);
         let x = self
             .anchor
             .x
@@ -99,23 +141,26 @@ impl FileActions {
 
     pub fn action_at(&self, screen: Rect, position: Position) -> Option<FileAction> {
         let area = self.area(screen);
-        area.contains(position)
-            .then(|| Self::actions()[(position.y - area.y) as usize])
+        if !area.contains(position) {
+            return None;
+        }
+        self.actions().get((position.y - area.y) as usize).copied()
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> FileActionEvent {
+        let count = self.actions().len();
         match key.code {
             KeyCode::Esc => FileActionEvent::Dismiss,
             KeyCode::Up | KeyCode::Left | KeyCode::BackTab => {
-                self.selected = (self.selected + 2) % 3;
+                self.selected = (self.selected + count - 1) % count;
                 FileActionEvent::None
             }
             KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => {
-                self.selected = (self.selected + 2) % 3;
+                self.selected = (self.selected + count - 1) % count;
                 FileActionEvent::None
             }
             KeyCode::Down | KeyCode::Right | KeyCode::Tab => {
-                self.selected = (self.selected + 1) % 3;
+                self.selected = (self.selected + 1) % count;
                 FileActionEvent::None
             }
             KeyCode::Home => {
@@ -123,15 +168,15 @@ impl FileActions {
                 FileActionEvent::None
             }
             KeyCode::End => {
-                self.selected = 2;
+                self.selected = count - 1;
                 FileActionEvent::None
             }
             KeyCode::Enter | KeyCode::Char(' ') => {
-                FileActionEvent::Choose(Self::actions()[self.selected])
+                FileActionEvent::Choose(self.actions()[self.selected])
             }
-            KeyCode::Char('o') => FileActionEvent::Choose(FileAction::Open),
-            KeyCode::Char('r') => FileActionEvent::Choose(FileAction::Reveal),
-            KeyCode::Char('y') => FileActionEvent::Choose(FileAction::Copy),
+            KeyCode::Char('o') => self.choose_if_present(FileAction::Open),
+            KeyCode::Char('r') => self.choose_if_present(FileAction::Reveal),
+            KeyCode::Char('y') => self.choose_if_present(FileAction::Copy),
             _ => FileActionEvent::None,
         }
     }
@@ -145,7 +190,8 @@ impl FileActions {
             MouseEventKind::Down(_) if action.is_none() => FileActionEvent::Dismiss,
             MouseEventKind::Moved => {
                 if let Some(action) = action {
-                    self.selected = Self::actions()
+                    self.selected = self
+                        .actions()
                         .iter()
                         .position(|item| *item == action)
                         .unwrap();
@@ -162,7 +208,8 @@ impl FileActions {
         let bg = colors.info;
         let fg = theme::contrast_text(bg);
         let base = Style::default().fg(fg).bg(bg);
-        for (index, (key, label)) in Self::labels().iter().take(area.height as usize).enumerate() {
+        let labels = self.labels();
+        for (index, (key, label)) in labels.iter().take(area.height as usize).enumerate() {
             let row = if index == self.selected {
                 base.add_modifier(Modifier::REVERSED | Modifier::BOLD)
             } else {
@@ -205,6 +252,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         let screen = Rect::new(0, 0, 80, 24);
         let area = popup.area(screen);
+        let labels = popup.labels();
         terminal
             .draw(|frame| {
                 frame.render_widget(Paragraph::new("underlying content"), screen);
@@ -212,7 +260,7 @@ mod tests {
             })
             .unwrap();
         let buffer = terminal.backend().buffer();
-        for (row, (key, label)) in FileActions::labels().iter().enumerate() {
+        for (row, (key, label)) in labels.iter().enumerate() {
             let rendered: String = (area.x..area.right())
                 .map(|x| buffer[(x, area.y + row as u16)].symbol())
                 .collect();
@@ -262,7 +310,7 @@ mod tests {
         let area = popup.area(screen);
         assert!(area.right() <= screen.right());
         assert!(area.bottom() <= screen.bottom());
-        for (row, action) in FileActions::actions().iter().enumerate() {
+        for (row, action) in popup.actions().iter().enumerate() {
             assert_eq!(
                 popup.action_at(screen, Position::new(area.x, area.y + row as u16)),
                 Some(*action)
@@ -354,6 +402,44 @@ mod tests {
                 }
             ),
             FileActionEvent::Dismiss
+        );
+    }
+
+    #[test]
+    fn url_menu_offers_open_and_copy_without_reveal() {
+        let mut popup =
+            FileActions::for_url("https://example.com/docs".into(), Position::new(2, 2));
+        let screen = Rect::new(0, 0, 80, 24);
+        assert_eq!(popup.area(screen).height, 2);
+        assert_eq!(popup.actions(), &[FileAction::Open, FileAction::Copy]);
+        assert_eq!(
+            popup
+                .labels()
+                .into_iter()
+                .map(|(_, label)| label)
+                .collect::<Vec<_>>(),
+            vec!["Open", "Copy URL"]
+        );
+        assert_eq!(popup.copy_payload(), "https://example.com/docs");
+        assert!(popup.file_target().is_none());
+        assert_eq!(
+            popup.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE)),
+            FileActionEvent::None
+        );
+        assert_eq!(
+            popup.action_at(
+                screen,
+                Position::new(popup.area(screen).x, popup.area(screen).y + 1)
+            ),
+            Some(FileAction::Copy)
+        );
+        assert_eq!(
+            popup.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            FileActionEvent::None
+        );
+        assert_eq!(
+            popup.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            FileActionEvent::Choose(FileAction::Copy)
         );
     }
 }

@@ -24,7 +24,9 @@ use crate::push_toast;
 use crate::toast::{self, Toast, ToastAction, ToastLevel};
 use crate::ui::components::action_dialog::{ActionDialog, ActionDialogEvent, ActionDialogItem};
 use crate::ui::components::chat::{Chat, ChatImageTarget};
-use crate::ui::components::file_actions::{FileAction, FileActionEvent, FileActions};
+use crate::ui::components::file_actions::{
+    FileAction, FileActionEvent, FileActions, LinkActionTarget,
+};
 use crate::ui::components::find::{FindBar, FindBarAction};
 use crate::ui::components::input::Input;
 use crate::ui::components::popup::Popup;
@@ -5426,6 +5428,16 @@ impl App {
         self.file_actions = Some(FileActions::new(target, anchor));
     }
 
+    fn show_url_actions(&mut self, url: String, anchor: Position) {
+        self.validate_file_actions();
+        if self.overlay_focus != OverlayFocus::None {
+            return;
+        }
+        self.dismiss_selection_actions();
+        self.pending_chat_message_click = None;
+        self.file_actions = Some(FileActions::for_url(url, anchor));
+    }
+
     fn open_chat_image_target(&mut self, target: &ChatImageTarget, anchor: Position) {
         self.show_file_actions(
             FileHyperlinkTarget {
@@ -5440,14 +5452,7 @@ impl App {
     fn open_chat_hyperlink_target(&mut self, target: &HyperlinkTarget, anchor: Position) {
         match target {
             HyperlinkTarget::File(target) => self.show_file_actions(target.clone(), anchor),
-            HyperlinkTarget::Url(url) => match crate::utils::file_opener::open_url(url) {
-                Ok(()) => push_toast(Toast::new(format!("Opened {url}"), ToastLevel::Info, None)),
-                Err(err) => push_toast(Toast::new(
-                    format!("Failed to open link: {err}"),
-                    ToastLevel::Error,
-                    None,
-                )),
-            },
+            HyperlinkTarget::Url(url) => self.show_url_actions(url.clone(), anchor),
         }
     }
 
@@ -5462,7 +5467,7 @@ impl App {
                 let Some(popup) = self.file_actions.take() else {
                     return;
                 };
-                self.perform_file_action(action, popup.target);
+                self.perform_link_action(action, popup.target);
             }
         }
     }
@@ -9264,6 +9269,30 @@ impl App {
     }
 
     fn perform_file_action(&mut self, action: FileAction, target: FileHyperlinkTarget) {
+        self.perform_link_action(action, LinkActionTarget::File(target));
+    }
+
+    fn perform_link_action(&mut self, action: FileAction, target: LinkActionTarget) {
+        let target = match target {
+            LinkActionTarget::Url(url) => {
+                match action {
+                    FileAction::Copy => self.copy_text_with_toast(&url, "Copied URL"),
+                    FileAction::Open => match crate::utils::file_opener::open_url(&url) {
+                        Ok(()) => {
+                            push_toast(Toast::new(format!("Opened {url}"), ToastLevel::Info, None))
+                        }
+                        Err(err) => push_toast(Toast::new(
+                            format!("Failed to open link: {err}"),
+                            ToastLevel::Error,
+                            None,
+                        )),
+                    },
+                    FileAction::Reveal => {}
+                }
+                return;
+            }
+            LinkActionTarget::File(target) => target,
+        };
         if action == FileAction::Copy {
             match crate::utils::file_opener::absolute_file_path(&target.path) {
                 Ok(path) => {
@@ -13879,7 +13908,7 @@ mod tests {
             },
             Position::new(2, 2),
         );
-        let target = &app.file_actions.as_ref().unwrap().target;
+        let target = app.file_actions.as_ref().unwrap().file_target().unwrap();
         assert!(target.path.is_absolute());
         assert_eq!(target.path.file_name().unwrap(), "file name.txt");
         assert_eq!(target.line, Some(14));
@@ -14057,7 +14086,7 @@ mod tests {
                 .expect("rendered relative chat link hitbox");
             app.handle_mouse_event(hit);
             let popup = app.file_actions.as_ref().expect("file actions after click");
-            assert_eq!(popup.target.path, path);
+            assert_eq!(popup.file_target().unwrap().path, path);
             assert_eq!(popup.copy_payload(), path.to_string_lossy());
             assert!(app.take_editor_suspend().is_none());
         }
@@ -14093,7 +14122,15 @@ mod tests {
             })
             .expect("rendered chat link hitbox");
         app.handle_mouse_event(hit);
-        assert_eq!(app.file_actions.as_ref().unwrap().target.path, path);
+        assert_eq!(
+            app.file_actions
+                .as_ref()
+                .unwrap()
+                .file_target()
+                .unwrap()
+                .path,
+            path
+        );
         assert!(app.take_editor_suspend().is_none());
         app.handle_keys(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         let buffer = terminal.backend().buffer();
@@ -14110,7 +14147,31 @@ mod tests {
             })
             .expect("rendered input image placeholder");
         app.handle_mouse_event(hit);
-        assert_eq!(app.file_actions.as_ref().unwrap().target.path, path);
+        assert_eq!(
+            app.file_actions
+                .as_ref()
+                .unwrap()
+                .file_target()
+                .unwrap()
+                .path,
+            path
+        );
+        assert!(app.take_editor_suspend().is_none());
+    }
+
+    #[test]
+    fn url_click_opens_action_menu_instead_of_the_browser() {
+        let mut app = test_app();
+        let url = "https://example.com/docs";
+        app.open_chat_hyperlink_target(&HyperlinkTarget::Url(url.into()), Position::new(4, 4));
+        let popup = app.file_actions.as_ref().expect("url action menu");
+        assert!(popup.file_target().is_none());
+        assert_eq!(popup.copy_payload(), url);
+        assert_eq!(popup.actions(), &[FileAction::Open, FileAction::Copy]);
+        app.handle_keys(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+        assert!(app.file_actions.is_some());
+        app.handle_keys(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.file_actions.is_none());
         assert!(app.take_editor_suspend().is_none());
     }
 
