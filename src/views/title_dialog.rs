@@ -1,5 +1,6 @@
 use crate::terminal_title::{normalized_items, TerminalTitleItem};
 use crate::theme::{contrast_text, ThemeColors};
+use crate::ui::components::dialog::dim_backdrop;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Position, Rect},
@@ -234,6 +235,7 @@ pub fn render_title_dialog(
         height: dialog_height,
     };
 
+    dim_backdrop(frame, area, state.dialog_area);
     frame.render_widget(Clear, state.dialog_area);
     frame.render_widget(
         Paragraph::new("").style(Style::default().bg(colors.dialog_background)),
@@ -287,8 +289,17 @@ pub fn render_title_dialog(
     );
 
     state.rows_area = chunks[2];
-    let mut lines = Vec::with_capacity(state.items.len() * 2);
     for (index, item) in state.items.iter().enumerate() {
+        let y = state.rows_area.y.saturating_add(index as u16 * 2);
+        if y >= state.rows_area.bottom() {
+            break;
+        }
+        let row_area = Rect {
+            x: state.rows_area.x,
+            y,
+            width: state.rows_area.width,
+            height: 2.min(state.rows_area.bottom().saturating_sub(y)),
+        };
         let selected = index == state.selected_index;
         let marker = if item.enabled { "[x]" } else { "[ ]" };
         let row_style = if selected {
@@ -303,16 +314,26 @@ pub fn render_title_dialog(
         } else {
             Style::default().fg(colors.text_weak)
         };
-        lines.push(Line::from(vec![
-            Span::styled(if selected { "› " } else { "  " }, row_style),
-            Span::styled(format!("{marker} {}", item.kind.label()), row_style),
-        ]));
-        lines.push(Line::from(Span::styled(
-            format!("      {}", item.kind.description()),
-            description_style,
-        )));
+        let lines = vec![
+            Line::from(vec![
+                Span::styled(if selected { "› " } else { "  " }, row_style),
+                Span::styled(format!("{marker} {}", item.kind.label()), row_style),
+            ]),
+            Line::from(Span::styled(
+                format!("      {}", item.kind.description()),
+                description_style,
+            )),
+        ];
+        let paragraph = Paragraph::new(lines);
+        frame.render_widget(
+            if selected {
+                paragraph.style(row_style)
+            } else {
+                paragraph
+            },
+            row_area,
+        );
     }
-    frame.render_widget(Paragraph::new(lines), state.rows_area);
 
     frame.render_widget(
         Paragraph::new(Line::from(vec![

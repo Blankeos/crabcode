@@ -1,4 +1,5 @@
 use crate::theme::{contrast_text, ThemeColors};
+use crate::ui::components::dialog::dim_backdrop;
 use crate::ui::scrollbar::{
     render_scrollbar, scrollbar_grab_offset, scrollbar_offset_from_row_with_grab, ScrollMetrics,
 };
@@ -310,6 +311,7 @@ impl ActionDialog {
             height: dialog_height,
         };
 
+        dim_backdrop(frame, area, self.dialog_area);
         frame.render_widget(Clear, self.dialog_area);
         frame.render_widget(
             Paragraph::new("").style(Style::default().bg(colors.dialog_background)),
