@@ -7,6 +7,8 @@ use std::process::{Command, Stdio};
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 
+mod progress;
+
 pub(crate) const GITHUB_REPO: &str = "Blankeos/crabcode";
 const BREW_FORMULA: &str = "blankeos/tap/crabcode";
 const NPM_PACKAGE: &str = "crabcode";
@@ -110,31 +112,21 @@ pub(crate) fn upgrade_noninteractive(target: Option<&str>) -> Result<String> {
 
 /// Upgrade crabcode to the latest release, or to a specific target version.
 pub fn upgrade(target: Option<&str>) -> Result<()> {
-    let current = env!("CARGO_PKG_VERSION").to_string();
-    let method = detect_install_method()?;
-    let exe = resolve_install_path()?;
-
-    println!("→ Current version: v{current}");
-    println!("→ Binary path:     {}", exe.display());
-    println!("→ Detected `{}`", method.label());
-
+    let current = current_version();
+    eprintln!("Installed version: {current}");
     let check = resolve_target_version(&current, target)?;
     if !check.needs_upgrade {
-        println!("✓ Already on v{} — nothing to do.", check.current);
+        eprintln!("Already on {}. Nothing to upgrade.", check.current);
         return Ok(());
     }
 
-    println!(
-        "→ Upgrading: v{} → {}",
-        check.current,
-        display_version(&check.target)
-    );
-
-    run_method_upgrade(&method, &check.target)?;
-
-    println!(
-        "✓ Upgrade complete. Restart crabcode to use {}.",
-        display_version(&check.target)
+    let method = detect_install_method()?;
+    eprintln!("\nUpgrading crabcode version: {}", check.target);
+    eprintln!("Using {}", method.label());
+    progress::run(|| run_method_upgrade_captured(&method, &check.target))?;
+    eprintln!(
+        "Upgraded crabcode to {}. Restart crabcode to apply.",
+        check.target
     );
     Ok(())
 }
@@ -150,6 +142,7 @@ fn resolve_target_version(current: &str, target: Option<&str>) -> Result<Version
     };
 
     let current_norm = normalize_version(current);
+    semver::Version::parse(&requested).context("invalid upgrade version")?;
     let needs_upgrade = current_norm != requested;
 
     Ok(VersionCheck {
@@ -161,10 +154,6 @@ fn resolve_target_version(current: &str, target: Option<&str>) -> Result<Version
 
 fn normalize_version(version: &str) -> String {
     version.trim().trim_start_matches('v').to_string()
-}
-
-fn display_version(version: &str) -> String {
-    format!("v{}", normalize_version(version))
 }
 
 /// Bounded GitHub lookup for the upgrade target (mirrors the 10s update
@@ -325,6 +314,9 @@ fn detect_install_method_from_path_impl(
     }
 
     // Heuristics when path alone is ambiguous
+    if load_receipt().as_ref().is_some_and(|r| r.claims_path(path)) {
+        return InstallMethod::InstallScript;
+    }
     if brew_claims() {
         return InstallMethod::Homebrew;
     }
@@ -410,18 +402,6 @@ fn detect_js_manager_strict() -> Option<JsPackageManager> {
     }
 }
 
-fn run_method_upgrade(method: &InstallMethod, target_version: &str) -> Result<()> {
-    match method {
-        InstallMethod::Homebrew => upgrade_brew(target_version),
-        InstallMethod::Js { manager } => upgrade_js(manager, target_version),
-        InstallMethod::Cargo { use_binstall } => upgrade_cargo(*use_binstall, target_version),
-        InstallMethod::InstallScript => upgrade_install_script(target_version),
-        InstallMethod::Unknown { path } => {
-            bail!("{}", unknown_method_help(path));
-        }
-    }
-}
-
 fn unknown_method_help(path: &Path) -> String {
     format!(
         "could not determine install method for `{}`.\n\
@@ -434,8 +414,8 @@ fn unknown_method_help(path: &Path) -> String {
     )
 }
 
-/// Captured mirror of [`run_method_upgrade`] for TUI use: nothing inherits the
-/// terminal, nothing prints, nothing can prompt.
+/// Shared runner for CLI and TUI: package-manager output never overwrites the
+/// progress row or active application, and missing input fails instead of hanging.
 fn run_method_upgrade_captured(method: &InstallMethod, target_version: &str) -> Result<()> {
     match method {
         InstallMethod::Homebrew => upgrade_brew_captured(target_version),
@@ -516,17 +496,21 @@ fn upgrade_install_script_captured(target_version: &str) -> Result<()> {
     #[cfg(not(windows))]
     {
         let tag = format!("v{}", normalize_version(target_version));
-        let url = format!(
-            "https://github.com/{GITHUB_REPO}/releases/download/{tag}/{BINARY_NAME}-installer.sh"
-        );
-        let latest_url = format!(
-            "https://github.com/{GITHUB_REPO}/releases/latest/download/{BINARY_NAME}-installer.sh"
-        );
-
-        let installer_bytes = download_bytes_captured(&url)
-            .filter(|bytes| !bytes.is_empty())
-            .or_else(|| download_bytes_captured(&latest_url).filter(|bytes| !bytes.is_empty()))
-            .context("failed to download installer")?;
+        let path = resolve_install_path()?;
+        let receipt = matching_receipt(load_shell_install_receipt(), &path);
+        let flat = receipt
+            .as_ref()
+            .is_none_or(|receipt| receipt.install_layout == "flat");
+        let installer_bytes = if flat {
+            include_bytes!("../install.sh").to_vec()
+        } else {
+            let url = format!(
+                "https://github.com/{GITHUB_REPO}/releases/download/{tag}/{BINARY_NAME}-installer.sh"
+            );
+            download_bytes_captured(&url)
+                .filter(|bytes| !bytes.is_empty())
+                .context("failed to download installer")?
+        };
 
         // Secure temp-file execution (no stdin-pipe deadlock):
         // the old code wrote the whole script to the child's stdin while
@@ -547,17 +531,25 @@ fn upgrade_install_script_captured(target_version: &str) -> Result<()> {
 
         let mut cmd = Command::new("sh");
         cmd.arg(script_file.path())
-            .arg(&tag)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .env("NONINTERACTIVE", "1")
             .env("GIT_TERMINAL_PROMPT", "0");
+        if flat {
+            cmd.arg(&tag);
+        }
         // Pin the reinstall to the original receipt prefix so an upgrade
         // overwrites the same destination even if CARGO_HOME drifted since
         // install. Both the per-app var and the generic dist override are
         // set; unknown installer versions ignore unknown env harmlessly.
-        if let Some(prefix) = load_shell_install_receipt().and_then(|r| r.reinstall_prefix()) {
+        let prefix = receipt.and_then(|r| r.reinstall_prefix()).or_else(|| {
+            resolve_install_path()
+                .ok()?
+                .parent()
+                .map(|path| path.to_string_lossy().into_owned())
+        });
+        if let Some(prefix) = prefix {
             cmd.env("CRABCODE_INSTALL_DIR", &prefix);
             cmd.env("CARGO_DIST_FORCE_INSTALL_DIR", &prefix);
         }
@@ -630,154 +622,6 @@ fn run_command_captured(program: &str, args: &[&str]) -> Result<()> {
             args.join(" "),
             output.status
         );
-    }
-    Ok(())
-}
-
-fn upgrade_brew(target_version: &str) -> Result<()> {
-    if !command_exists("brew") {
-        bail!("detected Homebrew install, but `brew` is not on PATH");
-    }
-
-    // Third-party formulae typically only track latest; specific versions aren't pin-installable.
-    let _ = target_version;
-    let args = ["upgrade", BREW_FORMULA];
-    println!("→ Doing `brew {}`", args.join(" "));
-    run_command("brew", &args)
-}
-
-fn upgrade_js(manager: &JsPackageManager, target_version: &str) -> Result<()> {
-    let spec = format!("{NPM_PACKAGE}@{target_version}");
-    let (bin, args) = manager.install_global_cmd(&spec);
-    if !command_exists(&bin) {
-        bail!(
-            "detected `{}` install, but `{bin}` is not on PATH",
-            manager.as_str()
-        );
-    }
-    println!("→ Doing `{} {}`", bin, args.join(" "));
-    run_command(&bin, &args.iter().map(String::as_str).collect::<Vec<_>>())
-}
-
-fn upgrade_cargo(use_binstall: bool, target_version: &str) -> Result<()> {
-    if use_binstall && command_exists("cargo-binstall") {
-        let args = [
-            "binstall".to_string(),
-            "-y".to_string(),
-            format!("{BINARY_NAME}@{target_version}"),
-        ];
-        println!("→ Doing `cargo {}`", args.join(" "));
-        return run_command(
-            "cargo",
-            &args.iter().map(String::as_str).collect::<Vec<_>>(),
-        );
-    }
-
-    if !command_exists("cargo") {
-        bail!("detected cargo install, but `cargo` is not on PATH");
-    }
-
-    let args = [
-        "install".to_string(),
-        BINARY_NAME.to_string(),
-        "--locked".to_string(),
-        "--force".to_string(),
-        "--version".to_string(),
-        target_version.to_string(),
-    ];
-    println!("→ Doing `cargo {}`", args.join(" "));
-    run_command(
-        "cargo",
-        &args.iter().map(String::as_str).collect::<Vec<_>>(),
-    )
-}
-
-fn upgrade_install_script(target_version: &str) -> Result<()> {
-    #[cfg(windows)]
-    {
-        let _ = target_version;
-        bail!(
-            "automatic upgrades via install script are not supported on Windows; \
-             reinstall with npm, cargo, or the latest GitHub release"
-        );
-    }
-
-    #[cfg(not(windows))]
-    {
-        let tag = format!("v{}", normalize_version(target_version));
-        let url = format!(
-            "https://github.com/{GITHUB_REPO}/releases/download/{tag}/{BINARY_NAME}-installer.sh"
-        );
-        let latest_url = format!(
-            "https://github.com/{GITHUB_REPO}/releases/latest/download/{BINARY_NAME}-installer.sh"
-        );
-
-        println!("→ Doing `curl ... | sh -s -- {tag}`");
-
-        let script = Command::new("curl")
-            .args(["-fsSL", "--max-time", "25", &url])
-            .stdin(Stdio::null())
-            .stderr(Stdio::piped())
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .output()
-            .context("failed to download installer")?;
-
-        let installer_bytes = if script.status.success() && !script.stdout.is_empty() {
-            script.stdout
-        } else {
-            let fallback = Command::new("curl")
-                .args(["-fsSL", "--max-time", "25", &latest_url])
-                .stdin(Stdio::null())
-                .stderr(Stdio::piped())
-                .env("GIT_TERMINAL_PROMPT", "0")
-                .output()
-                .context("failed to download installer")?;
-            if !fallback.status.success() {
-                bail!(
-                    "failed to download installer: {}",
-                    String::from_utf8_lossy(&fallback.stderr)
-                );
-            }
-            fallback.stdout
-        };
-
-        let mut child = Command::new("sh")
-            .arg("-s")
-            .arg("--")
-            .arg(&tag)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .context("failed to start installer shell")?;
-
-        use std::io::Write;
-        child
-            .stdin
-            .as_mut()
-            .context("failed to open installer stdin")?
-            .write_all(&installer_bytes)
-            .context("failed to pipe installer script")?;
-
-        let status = child.wait().context("installer failed to run")?;
-        if !status.success() {
-            bail!("installer exited with {status}");
-        }
-        Ok(())
-    }
-}
-
-fn run_command(program: &str, args: &[&str]) -> Result<()> {
-    let status = Command::new(program)
-        .args(args)
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .with_context(|| format!("failed to run `{program}`"))?;
-
-    if !status.success() {
-        bail!("`{program} {}` failed with {status}", args.join(" "));
     }
     Ok(())
 }
@@ -962,10 +806,12 @@ impl InstallReceipt {
         if prefix.as_os_str().is_empty() {
             return false;
         }
-        // cargo-home layout installs to `<prefix>/bin`; flat layouts install
-        // directly under prefix. `starts_with(prefix)` covers both without
-        // guessing layout strings.
-        binary_path.starts_with(&prefix)
+        let directory = match self.install_layout.as_str() {
+            "flat" => prefix,
+            "cargo-home" | "hierarchical" => prefix.join("bin"),
+            _ => return false,
+        };
+        binary_path.parent() == Some(directory.as_path())
     }
 
     /// Prefix to force on reinstall so the upgrade overwrites the original
@@ -977,6 +823,10 @@ impl InstallReceipt {
         }
         Some(prefix.to_string())
     }
+}
+
+fn matching_receipt(receipt: Option<InstallReceipt>, path: &Path) -> Option<InstallReceipt> {
+    receipt.filter(|receipt| receipt.claims_path(path))
 }
 
 fn expand_receipt_prefix(raw: &str) -> PathBuf {
@@ -1319,6 +1169,48 @@ mod tests {
         let check = resolve_target_version("0.0.10", Some("v0.0.10")).unwrap();
         assert!(!check.needs_upgrade);
         assert_eq!(check.target, "0.0.10");
+    }
+
+    #[test]
+    fn rejects_invalid_upgrade_versions() {
+        for version in ["--quiet", "1.2.3/../../latest", "", "1.2", "1.2.3\nother"] {
+            assert!(resolve_target_version("1.0.0", Some(version)).is_err());
+        }
+    }
+
+    #[test]
+    fn detects_receipt_owned_custom_prefix() {
+        let path = PathBuf::from("/custom/install/bin/crabcode");
+        let receipt = InstallReceipt {
+            binaries: vec![BINARY_NAME.into()],
+            install_prefix: "/custom/install/bin".into(),
+            install_layout: "flat".into(),
+            ..Default::default()
+        };
+        let method = detect_with(
+            &path,
+            &fake_cargo_bin(),
+            Some(receipt),
+            false,
+            false,
+            None,
+            false,
+        );
+        assert_eq!(method, InstallMethod::InstallScript);
+    }
+
+    #[test]
+    fn stale_or_nested_receipts_cannot_redirect_upgrade() {
+        let receipt = shell_receipt_for("/custom/install");
+        assert!(receipt.claims_path(Path::new("/custom/install/bin/crabcode")));
+        assert!(!receipt.claims_path(Path::new("/custom/install/other/bin/crabcode")));
+        assert!(
+            matching_receipt(Some(receipt), Path::new("/home/me/.local/bin/crabcode")).is_none()
+        );
+        let mut flat = shell_receipt_for("/custom/install");
+        flat.install_layout = "flat".into();
+        assert!(flat.claims_path(Path::new("/custom/install/crabcode")));
+        assert!(!flat.claims_path(Path::new("/custom/install/bin/crabcode")));
     }
 
     #[test]
