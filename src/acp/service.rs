@@ -2229,13 +2229,50 @@ fn model_config_option(
         }
     }
 
-    SessionConfigOption::select(
-        "model",
-        "Model",
-        format!("{provider}/{model_id}"),
-        model_groups,
-    )
-    .category(SessionConfigOptionCategory::Model)
+    // T3 Code's ACP registry probe keeps the first 256 models in advertisement
+    // order. Lead with the active provider, then smaller catalogs, so that
+    // truncation still includes the models this session can run.
+    let current_value = format!("{provider}/{model_id}");
+    let model_groups = prioritize_model_groups(model_groups, provider, &current_value);
+
+    SessionConfigOption::select("model", "Model", current_value, model_groups)
+        .category(SessionConfigOptionCategory::Model)
+}
+
+fn prioritize_model_groups(
+    mut groups: Vec<SessionConfigSelectGroup>,
+    provider: &str,
+    current_value: &str,
+) -> Vec<SessionConfigSelectGroup> {
+    let Some(current_index) = groups
+        .iter()
+        .position(|group| group.group.to_string() == provider)
+    else {
+        sort_model_groups_by_size(&mut groups);
+        return groups;
+    };
+
+    let mut current = groups.remove(current_index);
+    if let Some(option_index) = current
+        .options
+        .iter()
+        .position(|option| option.value.to_string() == current_value)
+    {
+        let selected = current.options.remove(option_index);
+        current.options.insert(0, selected);
+    }
+    sort_model_groups_by_size(&mut groups);
+    groups.insert(0, current);
+    groups
+}
+
+fn sort_model_groups_by_size(groups: &mut [SessionConfigSelectGroup]) {
+    groups.sort_by(|left, right| {
+        left.options
+            .len()
+            .cmp(&right.options.len())
+            .then_with(|| left.name.cmp(&right.name))
+    });
 }
 
 fn model_value(model: &crate::model::types::Model) -> String {
@@ -3355,11 +3392,68 @@ fn system_time_to_iso8601(value: std::time::SystemTime) -> String {
 }
 
 fn internal_error() -> Error {
-    Error::internal_error().data("Crabcode ACP operation failed")
+    Error::new(-32603, "Crabcode ACP operation failed")
 }
 
 fn internal_error_with(error: &str) -> Error {
-    Error::internal_error().data(format!("Crabcode ACP operation failed: {error}"))
+    Error::new(-32603, client_visible_error(error)).data(error.to_string())
+}
+
+/// ACP clients such as T3 Code display the JSON-RPC `message` and drop `data`.
+fn client_visible_error(error: &str) -> String {
+    let owned = embedded_json_message(error).unwrap_or_else(|| error.to_string());
+    let detail = owned.trim();
+    let clipped = clip_chars(detail, 400);
+    if clipped.is_empty() {
+        "Crabcode ACP operation failed".to_string()
+    } else {
+        clipped
+    }
+}
+
+fn embedded_json_message(error: &str) -> Option<String> {
+    let mut rest = error;
+    while let Some(start) = rest.find('{') {
+        let candidate = &rest[start..];
+        let mut values =
+            serde_json::Deserializer::from_str(candidate).into_iter::<serde_json::Value>();
+        if let Some(Ok(value)) = values.next() {
+            if let Some(message) = json_error_message(&value) {
+                return Some(message);
+            }
+        }
+        rest = &candidate[1..];
+    }
+    None
+}
+
+fn json_error_message(value: &serde_json::Value) -> Option<String> {
+    let message = value
+        .pointer("/error/message")
+        .or_else(|| value.pointer("/message"))
+        .and_then(serde_json::Value::as_str)?
+        .trim();
+    if message.is_empty() {
+        None
+    } else {
+        Some(message.to_string())
+    }
+}
+
+fn clip_chars(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let mut out = String::new();
+    for _ in 0..max_chars {
+        match chars.next() {
+            Some(ch) => out.push(ch),
+            None => return out,
+        }
+    }
+    if chars.next().is_some() {
+        out.pop();
+        out.push('…');
+    }
+    out
 }
 
 #[cfg(test)]
@@ -4635,9 +4729,13 @@ mod tests {
     fn builds_grouped_model_config_option() {
         let option = model_config_option(
             &[
+                model("zeta", "Zeta", "z1", "Z1"),
+                model("zeta", "Zeta", "z2", "Z2"),
+                model("zeta", "Zeta", "z3", "Z3"),
                 model("anthropic", "Anthropic", "claude", "Claude"),
-                model("openai", "OpenAI", "gpt-5", "GPT-5"),
+                model("alpha", "Alpha", "a1", "A1"),
                 model("openai", "OpenAI", "gpt-5-mini", "GPT-5 Mini"),
+                model("openai", "OpenAI", "gpt-5", "GPT-5"),
             ],
             "openai",
             "gpt-5",
@@ -4655,9 +4753,24 @@ mod tests {
         else {
             panic!("model options should be grouped");
         };
-        assert_eq!(groups.len(), 2);
-        assert_eq!(groups[1].name, "OpenAI");
-        assert_eq!(groups[1].options[1].value.to_string(), "openai/gpt-5-mini");
+        let names = groups
+            .iter()
+            .map(|group| group.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["OpenAI", "Alpha", "Anthropic", "Zeta"]);
+        assert_eq!(groups[0].options[0].value.to_string(), "openai/gpt-5");
+        assert_eq!(groups[0].options[1].value.to_string(), "openai/gpt-5-mini");
+    }
+
+    #[test]
+    fn acp_error_message_uses_provider_text() {
+        let error = client_visible_error(
+            r#"Streaming failed: provider_step_error error=Provider error: API error 401 Unauthorized: {"error":{"message":"Your API key has expired. Log in again.","type":"authentication_error","code":"UNAUTHORIZED"}}"#,
+        );
+        assert_eq!(error, "Your API key has expired. Log in again.");
+
+        let fallback = client_visible_error("session storage unavailable");
+        assert_eq!(fallback, "session storage unavailable");
     }
 
     #[test]
