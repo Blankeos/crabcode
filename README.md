@@ -78,6 +78,18 @@ It works (almost) exactly like OpenCode. Just opens faster, with some intuitive 
   - When switching models, you can press `⇆` to change thinking efforts.
   - Copy on select is disabled by default. Copy is two-step in crabcode. Gets annoying in OpenCode, especially w/ clipboard history.
 
+### Auto-approve Permissions
+
+Use `--auto` to run tools without permission prompts in the terminal, print mode, or an ACP editor session:
+
+```sh
+crabcode --auto
+crabcode --auto -p "Refactor this module"
+crabcode acp --auto
+```
+
+Only enable this for trusted tasks: commands and file changes run without approval. Explicit permission denies, disabled tools, and agent restrictions still apply. Without `--auto`, permission prompts work normally. `--dangerously-skip-permissions` and `--yolo` are equivalent aliases.
+
 ### Shell Completion
 
 ```sh

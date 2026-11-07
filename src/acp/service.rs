@@ -28,6 +28,7 @@ pub struct AcpService {
     sessions: Arc<AsyncMutex<AcpSessions>>,
     session_manager: Arc<Mutex<SessionManager>>,
     client_capabilities: Arc<Mutex<agent_client_protocol::schema::v1::ClientCapabilities>>,
+    dangerously_skip_permissions: bool,
 }
 
 // Attachments detach immediately on close, but a turn retains ownership until all
@@ -847,7 +848,10 @@ struct AcpSession {
 }
 
 impl AcpService {
-    pub fn new(initial_workspace: &Path) -> Result<Self, Error> {
+    pub fn new(
+        initial_workspace: &Path,
+        dangerously_skip_permissions: bool,
+    ) -> Result<Self, Error> {
         let session_manager = SessionManager::new()
             .with_history_for_workspace(initial_workspace)
             .map_err(|_| internal_error())?;
@@ -855,6 +859,7 @@ impl AcpService {
             sessions: Arc::new(AsyncMutex::new(AcpSessions::default())),
             session_manager: Arc::new(Mutex::new(session_manager)),
             client_capabilities: Arc::new(Mutex::new(Default::default())),
+            dangerously_skip_permissions,
         })
     }
 
@@ -934,7 +939,8 @@ impl AcpService {
         };
 
         let skills = crate::skill::SkillStore::load(&config.xdg_config_home, &config.project_root);
-        let tool_permissions = configured_tool_permissions(&cwd, &config);
+        let tool_permissions =
+            configured_tool_permissions(&cwd, &config, self.dangerously_skip_permissions);
         self.sessions.lock().await.attachments.insert(
             session_id.clone(),
             AcpSession {
@@ -1059,7 +1065,11 @@ impl AcpService {
         self.sessions.lock().await.attachments.insert(
             fork_id.clone(),
             AcpSession {
-                tool_permissions: configured_tool_permissions(&source.cwd, &source.config),
+                tool_permissions: configured_tool_permissions(
+                    &source.cwd,
+                    &source.config,
+                    self.dangerously_skip_permissions,
+                ),
                 ..source.clone()
             },
         );
@@ -1232,7 +1242,8 @@ impl AcpService {
             reasoning.unwrap_or(crate::model::reasoning::ReasoningEffort::None);
         let context_window = model_context_window(&config, &models, &provider, &model);
         let skills = crate::skill::SkillStore::load(&config.xdg_config_home, &config.project_root);
-        let tool_permissions = configured_tool_permissions(&cwd, &config);
+        let tool_permissions =
+            configured_tool_permissions(&cwd, &config, self.dangerously_skip_permissions);
         let session = AcpSession {
             cwd,
             config,
@@ -2131,15 +2142,21 @@ fn resolve_model(config: &LoadedConfig) -> (String, String) {
         .unwrap_or_else(|| ("opencode".to_string(), "big-pickle".to_string()))
 }
 
-fn configured_tool_permissions(cwd: &Path, config: &LoadedConfig) -> crate::tools::ToolPermissions {
+fn configured_tool_permissions(
+    cwd: &Path,
+    config: &LoadedConfig,
+    dangerously_skip_permissions: bool,
+) -> crate::tools::ToolPermissions {
     let mut policies = crate::tools::AgentToolPolicies::default();
     for (mode, tools) in config.merged_config.agent_registry.tool_policy_map() {
         policies = policies.with_custom_tools(mode, tools);
     }
     crate::tools::ToolPermissions::new(cwd)
         .with_agent_policies(policies)
+        .with_global_tool_config(config.merged_config.tools.clone())
         .with_permission_rules(config.merged_config.permission_rules.clone())
         .with_agent_permission_rules(config.merged_config.agent_registry.permission_rules_map())
+        .dangerously_skip_permissions(dangerously_skip_permissions)
 }
 
 fn tool_permissions(session: &AcpSession) -> crate::tools::ToolPermissions {
@@ -3571,7 +3588,7 @@ mod tests {
 
     #[test]
     fn terminal_support_tracks_client_capability() {
-        let service = AcpService::new(Path::new("/tmp")).unwrap();
+        let service = AcpService::new(Path::new("/tmp"), false).unwrap();
         assert!(!service.supports_terminals());
 
         service.set_client_capabilities(
@@ -3701,6 +3718,81 @@ mod tests {
             .expect("always option");
         assert_eq!(always.name, "Always allow for this session");
         assert_eq!(always.kind, PermissionOptionKind::AllowAlways);
+    }
+
+    #[tokio::test]
+    async fn acp_auto_bypasses_prompts_but_preserves_restrictions() {
+        use crate::tools::{PermissionPolicyAction, PermissionRule};
+        let mut config = empty_config();
+        config.merged_config.tools.insert("bash".into(), false);
+        config.merged_config.permission_rules.push(PermissionRule {
+            permission: "*".into(),
+            pattern: "*".into(),
+            action: PermissionPolicyAction::Ask,
+        });
+        let permissions = configured_tool_permissions(Path::new("/tmp/workspace"), &config, true);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        for _ in 0..4 {
+            for (tool, params) in [
+                (
+                    "read",
+                    serde_json::json!({"file_path": "/tmp/external/.env"}),
+                ),
+                (
+                    "write",
+                    serde_json::json!({"file_path": "/tmp/external/output.txt", "content": "test"}),
+                ),
+            ] {
+                assert!(permissions
+                    .preflight("build", tool, &params, Some(&tx))
+                    .await
+                    .is_ok());
+            }
+        }
+        assert!(permissions
+            .preflight(
+                "build",
+                "bash",
+                &serde_json::json!({"command": "echo test"}),
+                Some(&tx)
+            )
+            .await
+            .is_err());
+        assert!(permissions
+            .preflight(
+                "plan",
+                "write",
+                &serde_json::json!({"file_path": "/tmp/workspace/output.txt", "content": "test"}),
+                Some(&tx)
+            )
+            .await
+            .is_err());
+        for permission in ["read", "external_directory"] {
+            let mut denied_config = config.clone();
+            denied_config
+                .merged_config
+                .permission_rules
+                .push(PermissionRule {
+                    permission: permission.into(),
+                    pattern: "*".into(),
+                    action: PermissionPolicyAction::Deny,
+                });
+            let denied =
+                configured_tool_permissions(Path::new("/tmp/workspace"), &denied_config, true);
+            assert!(denied
+                .preflight(
+                    "build",
+                    "read",
+                    &serde_json::json!({"file_path": "/tmp/external/file.txt"}),
+                    Some(&tx)
+                )
+                .await
+                .is_err());
+        }
+        assert!(
+            rx.try_recv().is_err(),
+            "auto mode emitted a permission prompt"
+        );
     }
 
     #[tokio::test]
@@ -4210,7 +4302,7 @@ mod tests {
         let skills = crate::skill::SkillStore::load(&config.xdg_config_home, &config.project_root);
         AcpSession {
             cwd: config.cwd.clone(),
-            tool_permissions: configured_tool_permissions(&config.cwd, &config),
+            tool_permissions: configured_tool_permissions(&config.cwd, &config, false),
             config,
             skills,
             models: Vec::new(),
@@ -4257,6 +4349,7 @@ mod tests {
                 sessions: Arc::new(AsyncMutex::new(AcpSessions::default())),
                 session_manager: Arc::new(Mutex::new(manager)),
                 client_capabilities: Arc::new(Mutex::new(Default::default())),
+                dangerously_skip_permissions: false,
             };
             let session = session_with_config(empty_config());
             service.sessions.lock().await.attachments.insert(session_id.clone(), session.clone());

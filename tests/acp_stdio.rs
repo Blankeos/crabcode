@@ -12,19 +12,29 @@ struct AcpProcess {
     _state: tempfile::TempDir,
 }
 
+impl Drop for AcpProcess {
+    fn drop(&mut self) {
+        self.stdin.take();
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
 impl AcpProcess {
     fn spawn(workspace: &std::path::Path) -> Self {
         let home = tempfile::tempdir().expect("home");
         let config = tempfile::tempdir().expect("config");
         let state = tempfile::tempdir().expect("state");
-        // Valid session setup must not depend on live models.dev availability.
+        // A published catalog keeps session setup on the warm, offline path.
+        // A models.dev cache alone still triggers runtime discovery (ollama ls)
+        // when no providers are connected, and fails if Ollama is unavailable.
         let cache = state.path().join("crabcode/cache");
         std::fs::create_dir_all(&cache).expect("cache directory");
         std::fs::write(
-            cache.join("models_dev_cache.json"),
+            cache.join("effective_catalog.json"),
             serde_json::to_vec(&serde_json::json!({
-                "data": {}, "schema_version": 5,
-                "timestamp": std::time::SystemTime::now()
+                "models": [], "schema_version": 2, "revision": 1,
+                "updated_at": std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()
             }))
             .unwrap(),
@@ -33,6 +43,10 @@ impl AcpProcess {
         let mut child = Command::new(env!("CARGO_BIN_EXE_crabcode"))
             .args(["acp", "--cwd"])
             .arg(workspace)
+            .current_dir(workspace)
+            // Test mode redirects auth/discovery to shared /tmp fixtures;
+            // these subprocesses must use only their private HOME/XDG dirs.
+            .env_remove("CRABCODE_TEST_MODE")
             .env("HOME", home.path())
             .env("XDG_CONFIG_HOME", config.path())
             .env("XDG_STATE_HOME", state.path())
@@ -241,6 +255,8 @@ fn login_with_piped_stdin_fails_promptly_without_protocol_output_or_secrets() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_crabcode"))
         .args(["acp", "--login", "--cwd"])
         .arg(workspace.path())
+        .current_dir(workspace.path())
+        .env_remove("CRABCODE_TEST_MODE")
         .env("HOME", home.path())
         .env("XDG_CONFIG_HOME", config.path())
         .env("XDG_STATE_HOME", state.path())
@@ -359,7 +375,7 @@ Wire skill instructions.
     let (new_session, mut notifications) = process.recv_response(2);
     let session_id = new_session["result"]["sessionId"]
         .as_str()
-        .expect("session id")
+        .unwrap_or_else(|| panic!("session/new did not return a session id: {new_session}"))
         .to_string();
     while !notifications
         .iter()

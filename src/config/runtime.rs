@@ -16,7 +16,7 @@ use crate::tools::{
 pub struct ConfigRuntimeOptions {
     /// When true, deny interactive-only tools (`question`, `update_plan`).
     pub print_mode: bool,
-    /// Skip permission prompts (`--dangerously-skip-permissions` / `--yolo`).
+    /// Skip permission prompts (`--auto` / `--dangerously-skip-permissions` / `--yolo`).
     pub dangerously_skip_permissions: bool,
 }
 

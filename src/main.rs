@@ -781,8 +781,12 @@ pub(crate) struct Args {
     #[arg(long = "reasoning-effort", value_parser = parse_reasoning_effort_arg)]
     reasoning_effort: Option<crate::model::reasoning::ReasoningEffort>,
 
-    /// Skip permission prompts in local interactive/print mode (dangerous). Explicit denies still apply.
-    #[arg(long = "dangerously-skip-permissions", visible_alias = "yolo")]
+    /// Automatically approve permission requests in interactive, print, and ACP modes (dangerous). Explicit denies still apply.
+    #[arg(
+        long = "dangerously-skip-permissions",
+        visible_aliases = ["auto", "yolo"],
+        global = true
+    )]
     dangerously_skip_permissions: bool,
 
     #[arg(long = "emit-logs", hide = true)]
@@ -1091,7 +1095,7 @@ async fn main() -> Result<()> {
             return if *login {
                 crate::acp::login(cwd.clone()).await
             } else {
-                crate::acp::run(cwd.clone()).await
+                crate::acp::run(cwd.clone(), args.dangerously_skip_permissions).await
             };
         }
         Some(Command::Completion { shell, install }) => {
@@ -1377,7 +1381,7 @@ mod tests {
 
     #[test]
     fn parses_permission_bypass_in_interactive_and_print_modes() {
-        for flag in ["--dangerously-skip-permissions", "--yolo"] {
+        for flag in ["--dangerously-skip-permissions", "--auto", "--yolo"] {
             let args = Args::try_parse_from(["crabcode", flag]).unwrap();
             assert!(args.dangerously_skip_permissions);
             assert!(!args.print_mode);
@@ -1390,10 +1394,29 @@ mod tests {
     }
 
     #[test]
+    fn parses_permission_bypass_before_and_after_acp() {
+        for flag in ["--auto", "--dangerously-skip-permissions", "--yolo"] {
+            for argv in [["crabcode", flag, "acp"], ["crabcode", "acp", flag]] {
+                let args = Args::try_parse_from(argv).unwrap();
+                assert!(args.dangerously_skip_permissions);
+                assert!(matches!(args.command, Some(Command::Acp { .. })));
+            }
+        }
+        let args = Args::try_parse_from(["crabcode", "acp"]).unwrap();
+        assert!(!args.dangerously_skip_permissions);
+    }
+
+    #[test]
     fn help_documents_permission_bypass_and_alias() {
         let help = root_help().unwrap();
         assert!(help.contains("--dangerously-skip-permissions"));
+        assert!(help.contains("auto"));
         assert!(help.contains("yolo"));
+        assert!(help.contains("Explicit denies still apply"));
+        let help = Args::try_parse_from(["crabcode", "acp", "--help"])
+            .unwrap_err()
+            .to_string();
+        assert!(help.contains("auto"));
         assert!(help.contains("Explicit denies still apply"));
     }
 
