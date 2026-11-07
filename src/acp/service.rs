@@ -1715,7 +1715,10 @@ impl AcpService {
                         cancelled = true;
                         break;
                     }
-                    crate::llm::ChunkMessage::Failed(error) => failed = Some(error),
+                    crate::llm::ChunkMessage::Failed(error) => {
+                        failed = Some(error);
+                        break;
+                    }
                     crate::llm::ChunkMessage::TurnStopReason(reason) => {
                         turn_stop_reason = Some(reason)
                     }
@@ -1768,6 +1771,42 @@ impl AcpService {
                 }
             }
 
+            if !cancelled && !cancellation.is_cancelled() {
+                if let Some(error) = failed.as_deref() {
+                    let pending_ids = assistant
+                        .parts
+                        .iter()
+                        .filter(|part| part.part_type == "tool_call")
+                        .filter_map(|part| part.tool_id().map(str::to_string))
+                        .filter(|id| {
+                            assistant.tool_result_part_data(id).is_none_or(|data| {
+                                matches!(data.get("status").and_then(|s| s.as_str()),
+                                    None | Some("running" | "pending"))
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    assistant.mark_running_tool_parts_failed(error);
+                    for id in pending_ids {
+                        let payload = assistant.tool_result_part_data(&id).unwrap();
+                        send_tool_result(
+                            connection,
+                            session_id,
+                            crate::llm::ToolCallResult {
+                                tool_call_id: id,
+                                role: "tool".to_string(),
+                                name: payload["name"].as_str().unwrap_or("tool").to_string(),
+                                content: payload.to_string(),
+                            },
+                            &session.cwd,
+                        )?;
+                    }
+                    let text = format!(
+                        "\n\nThe AI request failed: {error}\nYou can retry or send another message in this session."
+                    );
+                    assistant.append(&text);
+                    send_text(connection, session_id, &message_id, text, false)?;
+                }
+            }
             Ok(())
         }
         .await;
@@ -1776,12 +1815,19 @@ impl AcpService {
         }
         assistant.is_complete = true;
         assistant.was_interrupted = cancelled || cancellation.is_cancelled();
+        if assistant.was_interrupted || failed.is_some() {
+            assistant.mark_running_tool_parts_failed(
+                failed
+                    .as_deref()
+                    .unwrap_or("Tool execution cancelled by user"),
+            );
+        }
         {
             let mut manager = self.session_manager.lock().map_err(|_| internal_error())?;
             let persist_result = manager.add_message_to_session(session_id, &assistant);
             let status = if assistant.was_interrupted {
                 crate::session::types::SessionStatus::Interrupted
-            } else if failed.is_some() {
+            } else if stream_result.is_err() {
                 crate::session::types::SessionStatus::Failed
             } else {
                 crate::session::types::SessionStatus::Idle
@@ -1795,8 +1841,8 @@ impl AcpService {
             return Ok(PromptResponse::new(StopReason::Cancelled));
         }
         stream_result?;
-        if let Some(error) = failed {
-            return Err(internal_error_with(&error));
+        if failed.is_some() {
+            return Ok(PromptResponse::new(StopReason::EndTurn));
         }
         Ok(PromptResponse::new(acp_stop_reason(turn_stop_reason)))
     }
@@ -4222,6 +4268,124 @@ mod tests {
             context_window: None,
             cancellation: None,
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn provider_failure_without_tools_keeps_acp_session_usable() {
+        provider_failure_keeps_session_usable(false).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn provider_failure_marks_pending_tools_failed_and_keeps_acp_session_usable() {
+        provider_failure_keeps_session_usable(true).await;
+    }
+
+    async fn provider_failure_keeps_session_usable(with_tools: bool) {
+        use agent_client_protocol::Agent;
+        use std::time::Duration;
+
+        tokio::task::LocalSet::new().run_until(async {
+            let workspace = tempfile::tempdir().unwrap();
+            let mut manager = SessionManager::new()
+                .with_history_for_workspace(workspace.path()).unwrap();
+            let session_id = manager.create_session(Some("ACP provider failure regression".into()));
+            let db_id = manager.get_db_id(&session_id).unwrap();
+            let service = AcpService {
+                sessions: Arc::new(AsyncMutex::new(AcpSessions::default())),
+                session_manager: Arc::new(Mutex::new(manager)),
+                client_capabilities: Arc::new(Mutex::new(Default::default())),
+            };
+            let session = session_with_config(empty_config());
+            service.sessions.lock().await.attachments.insert(session_id.clone(), session.clone());
+            let (observed_tx, mut observed_rx) = tokio::sync::mpsc::unbounded_channel();
+            let client = Client.builder().on_receive_notification(
+                async move |notification: SessionNotification, _connection| {
+                    let _ = observed_tx.send(serde_json::to_value(notification).unwrap());
+                    Ok(())
+                },
+                agent_client_protocol::on_receive_notification!(),
+            );
+            Agent.builder().connect_with(client, async move |connection| {
+                let cancellation = service.sessions.lock().await.begin_prompt(&session_id).unwrap();
+                let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+                let error = "Streaming failed: API error 400: No tool output found for function call call_119.";
+                if with_tools {
+                    sender.send(crate::llm::ChunkMessage::Text("Inspecting files.".into())).unwrap();
+                    let calls = ["completed-tool", "call_119"].into_iter().map(|id| crate::llm::ToolCall {
+                        id: id.into(),
+                        call_type: "function".into(),
+                        function: crate::llm::tool_calls::FunctionCall {
+                            name: "read".into(), arguments: "{\"file_path\":\"src/lib.rs\"}".into(),
+                        },
+                    }).collect();
+                    sender.send(crate::llm::ChunkMessage::ToolCalls(calls)).unwrap();
+                    sender.send(crate::llm::ChunkMessage::ToolResult(crate::llm::ToolCallResult {
+                        tool_call_id: "completed-tool".into(), role: "tool".into(), name: "read".into(),
+                        content: serde_json::json!({"status":"ok", "output_preview":"file contents"}).to_string(),
+                    })).unwrap();
+                }
+                sender.send(crate::llm::ChunkMessage::Failed(error.into())).unwrap();
+                sender.send(crate::llm::ChunkMessage::End).unwrap();
+                let response = service.receive_prompt_stream(
+                    &session_id, &session, &connection, &cancellation, receiver, 0, 0.0,
+                ).await.expect("provider errors must not become ACP RPC errors");
+                assert_eq!(response.stop_reason, StopReason::EndTurn);
+                service.sessions.lock().await.finish_prompt(&session_id);
+
+                let mut saw_failed_tool = false;
+                let mut saw_error_message = false;
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    while let Some(notification) = observed_rx.recv().await {
+                        let update = &notification["update"];
+                        if update["sessionUpdate"] == "tool_call_update" && update["toolCallId"] == "call_119" {
+                            assert_eq!(update["status"], "failed");
+                            saw_failed_tool = true;
+                        }
+                        if update["sessionUpdate"] == "agent_message_chunk"
+                            && update["content"]["text"].as_str().is_some_and(|text| text.contains(error)) {
+                            saw_error_message = true;
+                            break;
+                        }
+                    }
+                }).await.unwrap();
+                assert!(saw_error_message, "client must receive the provider error in-band");
+                assert_eq!(saw_failed_tool, with_tools);
+                {
+                    let manager = service.session_manager.lock().unwrap();
+                    let stored = manager.get_session_ref(&session_id).unwrap();
+                    assert_eq!(stored.status, crate::session::types::SessionStatus::Idle);
+                    let assistant = stored.messages.last().unwrap();
+                    assert!(assistant.is_complete);
+                    assert!(!assistant.was_interrupted);
+                    assert!(!assistant.has_running_tool_parts());
+                    assert!(assistant.content.contains(error));
+                    if with_tools {
+                        assert_eq!(assistant.tool_result_part_data("completed-tool").unwrap()["status"], "ok");
+                        assert_eq!(assistant.tool_result_part_data("call_119").unwrap()["status"], "error");
+                        assert_eq!(assistant.tool_result_part_data("call_119").unwrap()["output_preview"], error);
+                    }
+                }
+                let dao = crate::persistence::HistoryDAO::new_for_workspace(workspace.path()).unwrap();
+                assert_eq!(dao.get_session(db_id).unwrap().unwrap().status, "idle");
+                let messages = dao.get_messages(db_id).unwrap();
+                assert_eq!(messages.len(), 1);
+                assert!(messages[0].parts.iter().any(|part| part.part_type == "text"
+                    && part.data["text"].as_str().is_some_and(|text| text.contains(error))));
+
+                let cancellation = service.sessions.lock().await.begin_prompt(&session_id).unwrap();
+                let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+                sender.send(crate::llm::ChunkMessage::Text("The next turn works.".into())).unwrap();
+                sender.send(crate::llm::ChunkMessage::End).unwrap();
+                let response = service.receive_prompt_stream(
+                    &session_id, &session, &connection, &cancellation, receiver, 0, 0.0,
+                ).await.unwrap();
+                assert_eq!(response.stop_reason, StopReason::EndTurn);
+                service.sessions.lock().await.finish_prompt(&session_id);
+                assert_eq!(service.session_manager.lock().unwrap().get_session_ref(&session_id).unwrap().messages.len(), 2);
+                service.session_manager.lock().unwrap().try_delete_session(&session_id).unwrap();
+                Ok(())
+            }).await.unwrap();
+        }).await;
     }
 
     #[tokio::test(flavor = "current_thread")]
