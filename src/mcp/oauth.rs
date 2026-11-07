@@ -89,6 +89,41 @@ pub fn logout(name: &str, url: &str) -> Result<bool> {
     super::credentials::delete(name, url)
 }
 
+fn registration_error(name: &str, server_url: &str, error: AuthError) -> anyhow::Error {
+    let forbidden = matches!(
+        &error,
+        AuthError::RegistrationFailed(message) if message.starts_with("HTTP 403 Forbidden:")
+    );
+    let message = format!("dynamic client registration failed: {error}");
+    if !forbidden {
+        return anyhow!(message);
+    }
+
+    let is_figma = url::Url::parse(server_url)
+        .ok()
+        .is_some_and(|url| url.host_str() == Some("mcp.figma.com"));
+    if is_figma {
+        anyhow!(
+            "{message}\n\n\
+             Figma rejected client registration before browser authorization could start. \
+             Figma's remote MCP server only accepts approved MCP clients; Crabcode may need Figma approval.\n\
+             Client approval details: https://developers.figma.com/docs/figma-mcp-server/mcp-clients-issues/\n\
+             Alternatively, if your Figma plan supports it, enable the desktop MCP server in Figma Dev Mode \
+             and configure mcp.{name} with url: http://127.0.0.1:3845/mcp and oauth: false. \
+             The desktop server does not use browser OAuth and does not support all remote features.\n\
+             Desktop setup: https://developers.figma.com/docs/figma-mcp-server/local-server-installation/"
+        )
+    } else {
+        anyhow!(
+            "{message}\n\n\
+             The server rejected client registration before browser authorization could start. \
+             Check whether the provider requires client approval or pre-registered OAuth credentials. \
+             If the provider issued credentials for Crabcode, configure mcp.{name}.oauth.clientId \
+             (and clientSecret if required), then retry authentication."
+        )
+    }
+}
+
 /// CLI PKCE login: print the URL and open the default browser only on Enter.
 /// Tokens are persisted to mcp-auth.json.
 pub async fn authenticate(name: &str, remote: &McpRemoteConfig) -> Result<()> {
@@ -277,7 +312,7 @@ async fn authenticate_with_url_action<F: Future<Output = ()>>(
         manager
             .register_client(CLIENT_NAME, &redirect_uri, &scope_refs)
             .await
-            .map_err(|e| anyhow!("dynamic client registration failed: {e}"))?;
+            .map_err(|e| registration_error(name, &remote.url, e))?;
     }
 
     let scope_refs: Vec<&str> = scopes.iter().map(|s| s.as_str()).collect();
@@ -408,6 +443,91 @@ mod tests {
     use super::*;
     use std::cell::Cell;
     use tokio::net::TcpStream;
+
+    #[tokio::test]
+    async fn sdk_registration_forbidden_response_gets_actionable_guidance() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0; 8192];
+            let count = stream.read(&mut request).await.unwrap();
+            assert!(String::from_utf8_lossy(&request[..count]).starts_with("POST /register "));
+            stream
+                .write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 9\r\nConnection: close\r\n\r\nForbidden")
+                .await
+                .unwrap();
+        });
+        let mut manager = AuthorizationManager::new(format!("{origin}/mcp").as_str())
+            .await
+            .unwrap();
+        manager.set_metadata(
+            serde_json::from_value(serde_json::json!({
+                "authorization_endpoint": format!("{origin}/authorize"),
+                "token_endpoint": format!("{origin}/token"),
+                "registration_endpoint": format!("{origin}/register")
+            }))
+            .unwrap(),
+        );
+        let error = manager
+            .register_client(CLIENT_NAME, "http://127.0.0.1:49152/callback", &[])
+            .await
+            .unwrap_err();
+        let message = registration_error("figma", "https://mcp.figma.com/mcp", error).to_string();
+        assert!(message.contains("HTTP 403 Forbidden: Forbidden"));
+        assert!(message.contains("approved MCP clients"));
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn figma_registration_denial_explains_client_approval_and_desktop_alternative() {
+        let error = registration_error(
+            "figma",
+            "https://mcp.figma.com/mcp",
+            AuthError::RegistrationFailed("HTTP 403 Forbidden: Forbidden".into()),
+        );
+        let message = error.to_string();
+        assert!(message.contains("HTTP 403 Forbidden: Forbidden"));
+        assert!(message.contains("before browser authorization"));
+        assert!(message.contains("approved MCP clients"));
+        assert!(message
+            .contains("https://developers.figma.com/docs/figma-mcp-server/mcp-clients-issues/"));
+        assert!(message.contains("http://127.0.0.1:3845/mcp"));
+        assert!(message.contains("oauth: false"));
+    }
+
+    #[test]
+    fn other_registration_denials_suggest_provider_issued_client_credentials() {
+        for url in [
+            "https://example.com/mcp",
+            "https://mcp.figma.com.example.com/mcp",
+            "https://example.com/mcp?server=mcp.figma.com",
+        ] {
+            let message = registration_error(
+                "design",
+                url,
+                AuthError::RegistrationFailed("HTTP 403 Forbidden: Forbidden".into()),
+            )
+            .to_string();
+            assert!(message.contains("mcp.design.oauth.clientId"));
+            assert!(message.contains("clientSecret"));
+            assert!(!message.contains("Figma"));
+        }
+    }
+
+    #[test]
+    fn other_registration_failures_keep_original_error_without_denial_advice() {
+        for error in [
+            AuthError::RegistrationFailed("HTTP 500 Internal Server Error: unavailable".into()),
+            AuthError::RegistrationFailed("HTTP 400 Bad Request: invalid_redirect_uri".into()),
+            AuthError::RegistrationFailed("invalid JSON containing 403".into()),
+            AuthError::AuthorizationRequired,
+        ] {
+            let expected = format!("dynamic client registration failed: {error}");
+            let actual = registration_error("figma", "https://mcp.figma.com/mcp", error);
+            assert_eq!(actual.to_string(), expected);
+        }
+    }
 
     #[tokio::test]
     async fn scope_selection_preserves_explicit_scopes_and_adds_offline_access() {
