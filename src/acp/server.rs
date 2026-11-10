@@ -13,7 +13,7 @@ use agent_client_protocol::{Agent, Stdio};
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 
-pub async fn run(cwd: Option<PathBuf>) -> Result<()> {
+pub async fn run(cwd: Option<PathBuf>, dangerously_skip_permissions: bool) -> Result<()> {
     let workspace = match cwd {
         Some(path) => path,
         None => std::env::current_dir().context("failed to determine current directory")?,
@@ -30,7 +30,7 @@ pub async fn run(cwd: Option<PathBuf>) -> Result<()> {
             workspace.display()
         )
     })?;
-    let service = crate::acp::service::AcpService::new(&workspace)
+    let service = crate::acp::service::AcpService::new(&workspace, dangerously_skip_permissions)
         .map_err(|_| anyhow::anyhow!("failed to initialize ACP session storage"))?;
     let initialize_service = service.clone();
 

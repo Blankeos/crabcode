@@ -11,8 +11,8 @@ mod service;
 use anyhow::Result;
 use std::path::PathBuf;
 
-pub async fn run(cwd: Option<PathBuf>) -> Result<()> {
-    server::run(cwd).await
+pub async fn run(cwd: Option<PathBuf>, dangerously_skip_permissions: bool) -> Result<()> {
+    server::run(cwd, dangerously_skip_permissions).await
 }
 
 pub async fn login(cwd: Option<PathBuf>) -> Result<()> {

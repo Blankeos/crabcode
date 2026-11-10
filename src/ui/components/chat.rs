@@ -9081,11 +9081,12 @@ mod tests {
     #[test]
     fn test_edit_tool_renders_codex_style_diff_summary() {
         let chat = Chat::new();
+        let path = std::env::current_dir().unwrap().join("README.md");
         let content = serde_json::json!({
             "name": "edit",
             "status": "ok",
             "args": {
-                "file_path": "/Users/carlo/Desktop/Projects/crabcode/README.md",
+                "file_path": path,
                 "old_string": "alpha\nbeta\nomega",
                 "new_string": "alpha\nbravo\nomega",
             },
