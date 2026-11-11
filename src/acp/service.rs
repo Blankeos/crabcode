@@ -1557,7 +1557,7 @@ impl AcpService {
             let _ = stream_sender.send(crate::llm::ChunkMessage::End);
         });
 
-        let response = self
+        let turn = self
             .receive_prompt_stream(
                 &session_id,
                 &session,
@@ -1568,12 +1568,16 @@ impl AcpService {
                 base_cost,
             )
             .await?;
-        if !cancellation.is_cancelled() && response.stop_reason != StopReason::Cancelled {
+        // Compaction would call the provider that just failed this turn.
+        if !cancellation.is_cancelled()
+            && turn.response.stop_reason != StopReason::Cancelled
+            && !turn.provider_failed
+        {
             let _ = self
                 .maybe_auto_compact_session(&session_id, &session, cancellation.clone(), 0)
                 .await?;
         }
-        Ok(response)
+        Ok(turn.response)
     }
 
     // Keep finalization outside every cancellable await, including client requests.
@@ -1586,7 +1590,7 @@ impl AcpService {
         mut receiver: tokio::sync::mpsc::UnboundedReceiver<crate::llm::ChunkMessage>,
         base_context_tokens: usize,
         base_cost: f64,
-    ) -> Result<PromptResponse, Error> {
+    ) -> Result<PromptTurn, Error> {
         let mut assistant = crate::session::types::Message::incomplete("");
         let message_id = assistant.id.clone();
         assistant.provider = Some(session.provider.clone());
@@ -1772,7 +1776,16 @@ impl AcpService {
             }
 
             if !cancelled && !cancellation.is_cancelled() {
-                if let Some(error) = failed.as_deref() {
+                if let Some(diagnostic) = failed.as_deref() {
+                    // The raw error is an internal diagnostic (step stats, tool names, request
+                    // body). Keep it in the log only; the transcript and the model get a summary.
+                    crate::emit_log!(
+                        "[ACP] provider failure session={} error={}",
+                        session_id,
+                        diagnostic
+                    );
+                    let summary = provider_failure_summary(diagnostic);
+                    let error = summary.as_str();
                     let pending_ids = assistant
                         .parts
                         .iter()
@@ -1817,9 +1830,10 @@ impl AcpService {
         assistant.was_interrupted = cancelled || cancellation.is_cancelled();
         if assistant.was_interrupted || failed.is_some() {
             assistant.mark_running_tool_parts_failed(
-                failed
+                &failed
                     .as_deref()
-                    .unwrap_or("Tool execution cancelled by user"),
+                    .map(provider_failure_summary)
+                    .unwrap_or_else(|| "Tool execution cancelled by user".to_string()),
             );
         }
         {
@@ -1838,13 +1852,13 @@ impl AcpService {
             persist_result.map_err(|_| internal_error())?;
         }
         if assistant.was_interrupted {
-            return Ok(PromptResponse::new(StopReason::Cancelled));
+            return Ok(PromptTurn::new(StopReason::Cancelled, false));
         }
         stream_result?;
         if failed.is_some() {
-            return Ok(PromptResponse::new(StopReason::EndTurn));
+            return Ok(PromptTurn::new(StopReason::EndTurn, true));
         }
-        Ok(PromptResponse::new(acp_stop_reason(turn_stop_reason)))
+        Ok(PromptTurn::new(acp_stop_reason(turn_stop_reason), false))
     }
 
     async fn compact_session(
@@ -2152,6 +2166,85 @@ fn compacted_messages(
         marker.compaction_stats = Some(stats);
     }
     Ok((compacted, stats))
+}
+
+/// A finished prompt turn. Provider failures are reported in-band as `end_turn`.
+#[derive(Debug)]
+struct PromptTurn {
+    response: PromptResponse,
+    provider_failed: bool,
+}
+
+impl PromptTurn {
+    fn new(stop_reason: StopReason, provider_failed: bool) -> Self {
+        Self {
+            response: PromptResponse::new(stop_reason),
+            provider_failed,
+        }
+    }
+}
+
+const PROVIDER_FAILURE_SUMMARY_MAX_CHARS: usize = 300;
+
+/// Short, one-line provider error for the transcript and the model.
+///
+/// Provider failures arrive as internal diagnostics such as
+/// `provider_step_error step=1 messages=2 tools=20 ... tool_names=[...] error=Provider error:
+/// API error 400 Bad Request: {"error":{"message":"..."}}`. Prefer the provider's own error
+/// message and drop the step stats, tool names, URLs and raw bodies.
+fn provider_failure_summary(diagnostic: &str) -> String {
+    let mut error = diagnostic.trim();
+    if error.starts_with("provider_step_error ") {
+        if let Some((_, rest)) = error.split_once(" error=") {
+            error = rest.trim();
+        }
+    }
+    let summary = provider_json_error_message(error).unwrap_or_else(|| {
+        let mut text = error;
+        for prefix in [
+            "Streaming failed: ",
+            "Retryable provider error: ",
+            "Provider error: ",
+            "Stream error: ",
+        ] {
+            text = text.strip_prefix(prefix).unwrap_or(text);
+        }
+        // Raw bodies (possibly truncated JSON) and request URLs are diagnostics.
+        for marker in [" url=", " body=", ": {", ": ["] {
+            if let Some(index) = text.find(marker) {
+                text = &text[..index];
+            }
+        }
+        text.to_string()
+    });
+    let summary = summary.lines().map(str::trim).find(|line| !line.is_empty());
+    let Some(summary) = summary else {
+        return "Provider request failed".to_string();
+    };
+    if summary.chars().count() <= PROVIDER_FAILURE_SUMMARY_MAX_CHARS {
+        return summary.to_string();
+    }
+    let mut truncated = summary
+        .chars()
+        .take(PROVIDER_FAILURE_SUMMARY_MAX_CHARS)
+        .collect::<String>();
+    truncated.push_str("...");
+    truncated
+}
+
+fn provider_json_error_message(error: &str) -> Option<String> {
+    let start = error.find('{')?;
+    let json = serde_json::Deserializer::from_str(&error[start..])
+        .into_iter::<serde_json::Value>()
+        .next()?
+        .ok()?;
+    let message = json
+        .get("error")
+        .and_then(|error| error.get("message").or(Some(error)))
+        .or_else(|| json.get("message"))
+        .and_then(serde_json::Value::as_str)?
+        .trim();
+    (!message.is_empty()).then(|| message.to_string())
 }
 
 fn acp_stop_reason(reason: Option<crate::llm::TurnStopReason>) -> StopReason {
@@ -4280,6 +4373,41 @@ mod tests {
         provider_failure_keeps_session_usable(true).await;
     }
 
+    #[test]
+    fn provider_failure_summary_keeps_only_the_provider_message() {
+        let step = "provider_step_error step=1 messages=2 tools=20 message_roles[system=1,user=1,assistant=0] tool_names=[bash,read,+18] tool_schema_bytes=9000 error=";
+        for (diagnostic, expected) in [
+            (
+                format!("{step}Provider error: API error 400 Bad Request: {{\"error\":{{\"message\":\"No tool output found for function call call_119.\",\"type\":\"invalid_request_error\"}}}}"),
+                "No tool output found for function call call_119.",
+            ),
+            (
+                format!("{step}Provider error: OpenAI API error: status=400 Bad Request url=https://api.openai.com/v1/responses body={{\"error\":{{\"message\":\"Bad input\"}}}}"),
+                "Bad input",
+            ),
+            (
+                format!("{step}Retryable provider error: API error 429 Too Many Requests: {{\"error\":{{\"message\":\"Slow down\"}}}} retries_exhausted=3"),
+                "Slow down",
+            ),
+            // Truncated bodies are not JSON; the raw body and URL still stay out.
+            (
+                format!("{step}Provider error: OpenAI API error: status=400 Bad Request url=https://api.openai.com/v1/responses body={{\"error\":{{\"mess"),
+                "OpenAI API error: status=400 Bad Request",
+            ),
+            (
+                "Streaming failed: connection reset by peer\nat transport layer".to_string(),
+                "connection reset by peer",
+            ),
+            ("   ".to_string(), "Provider request failed"),
+        ] {
+            assert_eq!(provider_failure_summary(&diagnostic), expected, "{diagnostic}");
+        }
+
+        let long = provider_failure_summary(&"x".repeat(1_000));
+        assert_eq!(long.chars().count(), PROVIDER_FAILURE_SUMMARY_MAX_CHARS + 3);
+        assert!(long.ends_with("..."));
+    }
+
     async fn provider_failure_keeps_session_usable(with_tools: bool) {
         use agent_client_protocol::Agent;
         use std::time::Duration;
@@ -4308,7 +4436,21 @@ mod tests {
             Agent.builder().connect_with(client, async move |connection| {
                 let cancellation = service.sessions.lock().await.begin_prompt(&session_id).unwrap();
                 let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
-                let error = "Streaming failed: API error 400: No tool output found for function call call_119.";
+                // What the aisdk step loop actually reports: step stats, tool names, raw body.
+                let diagnostic = concat!(
+                    "provider_step_error step=1 messages=2 tools=20 ",
+                    "message_roles[system=1,user=1,assistant=0] message_text_bytes=4096 images=0 ",
+                    "tool_names=[bash,read,edit,+17] tool_schema_bytes=9000 tool_description_bytes=7000 ",
+                    "error=Provider error: API error 400 Bad Request: {\"error\":{\"message\":",
+                    "\"No tool output found for function call call_119.\",",
+                    "\"type\":\"invalid_request_error\",\"param\":\"input\",\"code\":null}}",
+                );
+                let error = "No tool output found for function call call_119.";
+                let leaks_diagnostic = |text: &str| {
+                    ["provider_step_error", "tool_names", "invalid_request_error"]
+                        .iter()
+                        .any(|marker| text.contains(marker))
+                };
                 if with_tools {
                     sender.send(crate::llm::ChunkMessage::Text("Inspecting files.".into())).unwrap();
                     let calls = ["completed-tool", "call_119"].into_iter().map(|id| crate::llm::ToolCall {
@@ -4324,12 +4466,12 @@ mod tests {
                         content: serde_json::json!({"status":"ok", "output_preview":"file contents"}).to_string(),
                     })).unwrap();
                 }
-                sender.send(crate::llm::ChunkMessage::Failed(error.into())).unwrap();
+                sender.send(crate::llm::ChunkMessage::Failed(diagnostic.into())).unwrap();
                 sender.send(crate::llm::ChunkMessage::End).unwrap();
-                let response = service.receive_prompt_stream(
+                let turn = service.receive_prompt_stream(
                     &session_id, &session, &connection, &cancellation, receiver, 0, 0.0,
                 ).await.expect("provider errors must not become ACP RPC errors");
-                assert_eq!(response.stop_reason, StopReason::EndTurn);
+                assert_eq!(turn.response.stop_reason, StopReason::EndTurn);
                 service.sessions.lock().await.finish_prompt(&session_id);
 
                 let mut saw_failed_tool = false;
@@ -4337,12 +4479,17 @@ mod tests {
                 tokio::time::timeout(Duration::from_secs(2), async {
                     while let Some(notification) = observed_rx.recv().await {
                         let update = &notification["update"];
+                        assert!(!leaks_diagnostic(&update.to_string()), "client got the diagnostic: {update}");
                         if update["sessionUpdate"] == "tool_call_update" && update["toolCallId"] == "call_119" {
                             assert_eq!(update["status"], "failed");
                             saw_failed_tool = true;
                         }
                         if update["sessionUpdate"] == "agent_message_chunk"
                             && update["content"]["text"].as_str().is_some_and(|text| text.contains(error)) {
+                            assert_eq!(
+                                update["content"]["text"],
+                                format!("\n\nThe AI request failed: {error}\nYou can retry or send another message in this session.")
+                            );
                             saw_error_message = true;
                             break;
                         }
@@ -4359,6 +4506,7 @@ mod tests {
                     assert!(!assistant.was_interrupted);
                     assert!(!assistant.has_running_tool_parts());
                     assert!(assistant.content.contains(error));
+                    assert!(!leaks_diagnostic(&assistant.content));
                     if with_tools {
                         assert_eq!(assistant.tool_result_part_data("completed-tool").unwrap()["status"], "ok");
                         assert_eq!(assistant.tool_result_part_data("call_119").unwrap()["status"], "error");
@@ -4371,15 +4519,19 @@ mod tests {
                 assert_eq!(messages.len(), 1);
                 assert!(messages[0].parts.iter().any(|part| part.part_type == "text"
                     && part.data["text"].as_str().is_some_and(|text| text.contains(error))));
+                // Persisted parts are what the next request replays to the model.
+                for part in &messages[0].parts {
+                    assert!(!leaks_diagnostic(&part.data.to_string()), "persisted diagnostic: {}", part.data);
+                }
 
                 let cancellation = service.sessions.lock().await.begin_prompt(&session_id).unwrap();
                 let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
                 sender.send(crate::llm::ChunkMessage::Text("The next turn works.".into())).unwrap();
                 sender.send(crate::llm::ChunkMessage::End).unwrap();
-                let response = service.receive_prompt_stream(
+                let turn = service.receive_prompt_stream(
                     &session_id, &session, &connection, &cancellation, receiver, 0, 0.0,
                 ).await.unwrap();
-                assert_eq!(response.stop_reason, StopReason::EndTurn);
+                assert_eq!(turn.response.stop_reason, StopReason::EndTurn);
                 service.sessions.lock().await.finish_prompt(&session_id);
                 assert_eq!(service.session_manager.lock().unwrap().get_session_ref(&session_id).unwrap().messages.len(), 2);
                 service.session_manager.lock().unwrap().try_delete_session(&session_id).unwrap();
@@ -4500,9 +4652,9 @@ mod tests {
                 } else {
                     cancellation.cancel();
                 }
-                let response = tokio::time::timeout(Duration::from_secs(1), &mut stream)
+                let turn = tokio::time::timeout(Duration::from_secs(1), &mut stream)
                     .await.unwrap().unwrap();
-                assert_eq!(response.stop_reason, StopReason::Cancelled);
+                assert_eq!(turn.response.stop_reason, StopReason::Cancelled);
                 if pending_permission {
                     assert!(matches!(response_rx.await.unwrap(), crate::tools::PermissionResponse::Deny));
                 }
