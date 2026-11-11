@@ -769,3 +769,182 @@ fn automatically_compacts_provider_usage_over_stdio() {
     process.close_and_wait();
     provider.finish();
 }
+
+/// Minimal OpenAI-compatible endpoint: the first chat request fails with the
+/// Responses API tool-output mismatch, later ones stream `reply`.
+struct MockProvider {
+    base_url: String,
+    requests: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl MockProvider {
+    fn start(reply: &'static str) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock provider");
+        let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = requests.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let Some((request_line, body)) = read_http_request(&mut stream) else {
+                    continue;
+                };
+                let response = if !request_line.starts_with("POST ") {
+                    http_response("404 Not Found", "application/json", "{}")
+                } else {
+                    let mut requests = recorded.lock().unwrap();
+                    requests.push(body);
+                    if requests.len() == 1 {
+                        http_response(
+                            "400 Bad Request",
+                            "application/json",
+                            r#"{"error":{"message":"No tool output found for function call call_119.","type":"invalid_request_error","param":"input","code":null}}"#,
+                        )
+                    } else {
+                        let delta = serde_json::json!({
+                            "choices": [{ "index": 0, "delta": { "content": reply }, "finish_reason": null }]
+                        });
+                        let stop = serde_json::json!({
+                            "choices": [{ "index": 0, "delta": {}, "finish_reason": "stop" }]
+                        });
+                        http_response(
+                            "200 OK",
+                            "text/event-stream",
+                            &format!("data: {delta}\n\ndata: {stop}\n\ndata: [DONE]\n\n"),
+                        )
+                    }
+                };
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        Self { base_url, requests }
+    }
+
+    fn requests(&self) -> Vec<String> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+fn read_http_request(stream: &mut TcpStream) -> Option<(String, String)> {
+    let mut reader = BufReader::new(stream.try_clone().ok()?);
+    let mut request_line = String::new();
+    reader.read_line(&mut request_line).ok()?;
+    let mut content_length = 0;
+    loop {
+        let mut header = String::new();
+        reader.read_line(&mut header).ok()?;
+        if header.trim().is_empty() {
+            break;
+        }
+        if let Some((name, value)) = header.split_once(':') {
+            if name.eq_ignore_ascii_case("content-length") {
+                content_length = value.trim().parse().ok()?;
+            }
+        }
+    }
+    let mut body = vec![0; content_length];
+    reader.read_exact(&mut body).ok()?;
+    Some((request_line, String::from_utf8_lossy(&body).into_owned()))
+}
+
+fn http_response(status: &str, content_type: &str, body: &str) -> String {
+    format!(
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+}
+
+fn agent_text(notifications: &[serde_json::Value]) -> String {
+    notifications
+        .iter()
+        .filter(|message| message["params"]["update"]["sessionUpdate"] == "agent_message_chunk")
+        .filter_map(|message| message["params"]["update"]["content"]["text"].as_str())
+        .collect()
+}
+
+#[test]
+fn provider_failure_reports_short_error_skips_compaction_and_recovers_over_stdio() {
+    let provider = MockProvider::start("Recovered: the next turn works.");
+    let workspace = tempfile::tempdir().expect("workspace");
+    // A small context window puts the session over the auto-compaction threshold
+    // as soon as the first turn is stored.
+    std::fs::write(
+        workspace.path().join("crabcode.json"),
+        serde_json::json!({
+            "model": "mock/mock-model",
+            "enabled_providers": ["mock"],
+            "provider": {
+                "mock": {
+                    "npm": "@ai-sdk/openai-compatible",
+                    "options": { "baseURL": provider.base_url, "apiKey": "test-key" },
+                    "models": {
+                        "mock-model": { "tool_call": true, "limit": { "context": 4000, "output": 1000 } }
+                    }
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("workspace config");
+    // Request-time provider discovery also reads the process working directory.
+    let mut process = AcpProcess::spawn_with_working_directory(workspace.path(), workspace.path());
+    initialize(&mut process);
+    process.send(serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "session/new",
+        "params": { "cwd": workspace.path(), "mcpServers": [] }
+    }));
+    let (new_session, _) = process.recv_response(2);
+    let session_id = new_session["result"]["sessionId"]
+        .as_str()
+        .unwrap_or_else(|| panic!("session id in {new_session}"))
+        .to_string();
+
+    let large_prompt = "Please review this context. ".repeat(600);
+    process.send(serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "session/prompt",
+        "params": { "sessionId": session_id, "prompt": [{ "type": "text", "text": large_prompt }] }
+    }));
+    let (failed, notifications) = process.recv_response(3);
+    assert_eq!(failed["result"]["stopReason"], "end_turn", "{failed}");
+    assert_eq!(
+        agent_text(&notifications),
+        "\n\nThe AI request failed: No tool output found for function call call_119.\nYou can retry or send another message in this session."
+    );
+    // Auto-compaction would have sent a summary request to the provider that just failed.
+    assert_eq!(
+        provider.requests().len(),
+        1,
+        "no compaction after a failed turn"
+    );
+
+    process.send(serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 4,
+        "method": "session/prompt",
+        "params": { "sessionId": session_id, "prompt": [{ "type": "text", "text": "Try again" }] }
+    }));
+    let (recovered, notifications) = process.recv_response(4);
+    assert_eq!(recovered["result"]["stopReason"], "end_turn", "{recovered}");
+    assert!(agent_text(&notifications).contains("Recovered: the next turn works."));
+    // The next turn compacts first (the session is over the threshold), then sends the
+    // turn itself. The failed turn is replayed only as the short note, never the diagnostic.
+    let requests = provider.requests();
+    assert!(requests.len() >= 2);
+    assert!(requests[1..].iter().any(|body| body
+        .contains("The AI request failed: No tool output found for function call call_119.")));
+    for body in &requests[1..] {
+        for diagnostic in [
+            "provider_step_error",
+            "tool_names=",
+            "invalid_request_error",
+        ] {
+            assert!(!body.contains(diagnostic), "replayed {diagnostic}: {body}");
+        }
+    }
+
+    process.close_and_wait();
+}
