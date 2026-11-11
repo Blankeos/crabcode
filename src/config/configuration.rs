@@ -1621,40 +1621,140 @@ fn parse_mcp(value: Option<&Value>, diagnostics: &mut ConfigDiagnostics) -> McpC
     };
 
     for (name, entry) in map {
-        let trimmed_name = name.trim();
-        if trimmed_name.is_empty() {
-            diagnostics
-                .warnings
-                .push("mcp server names must not be empty".to_string());
+        if name == "servers" && is_mcp_server_map(entry) {
+            let Some(servers) = entry.as_object() else {
+                continue;
+            };
+            for (server_name, server) in servers {
+                insert_mcp_server(&mut out, server_name, server, "mcp.servers", diagnostics);
+            }
             continue;
         }
-        match parse_mcp_server(trimmed_name, entry, diagnostics) {
-            Some(server) => {
-                out.insert(trimmed_name.to_string(), server);
-            }
-            None => continue,
+        // OpenCode v2 keeps default timeouts next to `servers`, not as a server.
+        if name == "timeout" && !looks_like_mcp_server(entry) {
+            continue;
         }
+        insert_mcp_server(&mut out, name, entry, "mcp", diagnostics);
     }
     out
 }
 
-fn parse_mcp_server(
+fn insert_mcp_server(
+    out: &mut McpConfig,
     name: &str,
+    entry: &Value,
+    prefix: &str,
+    diagnostics: &mut ConfigDiagnostics,
+) {
+    let trimmed_name = name.trim();
+    if trimmed_name.is_empty() {
+        diagnostics
+            .warnings
+            .push(format!("{prefix} server names must not be empty"));
+        return;
+    }
+    let label = format!("{prefix}.{trimmed_name}");
+    if let Some(server) = parse_mcp_server(&label, entry, diagnostics) {
+        out.insert(trimmed_name.to_string(), server);
+    }
+}
+
+/// `mcp.servers` is a map of server configs. A legacy server literally named
+/// `servers` has `type`, `url`, or `command` on the object itself.
+fn is_mcp_server_map(value: &Value) -> bool {
+    value.as_object().is_some() && !looks_like_mcp_server(value)
+}
+
+fn looks_like_mcp_server(value: &Value) -> bool {
+    value.as_object().is_some_and(|map| {
+        map.contains_key("type") || map.contains_key("url") || map.contains_key("command")
+    })
+}
+
+/// Winning config file for each MCP server name. Later sources replace earlier ones,
+/// matching config merge order: OpenCode global, crabcode global, OpenCode project, crabcode project.
+pub fn mcp_config_locations_for(cwd: &Path) -> BTreeMap<String, PathBuf> {
+    let cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+    mcp_config_locations(&xdg_config_home(), &discover_project_root(&cwd))
+}
+
+pub fn mcp_config_locations(
+    xdg_config_home: &Path,
+    project_root: &Path,
+) -> BTreeMap<String, PathBuf> {
+    let Ok(sources) = resolve_sources(xdg_config_home, project_root) else {
+        return BTreeMap::new();
+    };
+    let mut found = BTreeMap::new();
+    for source in sources {
+        let Ok(value) = load_config_value(&source.path) else {
+            continue;
+        };
+        for name in mcp_server_names(&value) {
+            found.insert(name, source.path.clone());
+        }
+    }
+    found
+}
+
+pub fn display_mcp_config_path(path: &Path, project_root: &Path) -> String {
+    if let Ok(relative) = path.strip_prefix(project_root) {
+        return format!("Project · {}", relative.display());
+    }
+    let shown = std::env::var_os("HOME")
+        .and_then(|home| {
+            path.strip_prefix(home)
+                .ok()
+                .map(|relative| format!("~/{}", relative.display()))
+        })
+        .unwrap_or_else(|| path.display().to_string());
+    format!("Global · {shown}")
+}
+
+fn mcp_server_names(value: &Value) -> Vec<String> {
+    let Some(mcp) = value.get("mcp").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    if let Some(servers) = mcp
+        .get("servers")
+        .filter(|entry| is_mcp_server_map(entry))
+        .and_then(Value::as_object)
+    {
+        names.extend(servers.keys().cloned());
+    }
+    for (name, entry) in mcp {
+        if name == "servers" || (name == "timeout" && !looks_like_mcp_server(entry)) {
+            continue;
+        }
+        if looks_like_mcp_server(entry) {
+            names.push(name.clone());
+        }
+    }
+    names
+}
+
+fn parse_mcp_server(
+    label: &str,
     entry: &Value,
     diagnostics: &mut ConfigDiagnostics,
 ) -> Option<McpServerConfig> {
     let Some(map) = entry.as_object() else {
         diagnostics
             .warnings
-            .push(format!("mcp.{name} must be an object"));
+            .push(format!("{label} must be an object"));
         return None;
     };
-    let enabled = map.get("enabled").and_then(Value::as_bool).unwrap_or(true);
-    let timeout_ms = parse_optional_u64(
-        map.get("timeout"),
-        &format!("mcp.{name}.timeout"),
-        diagnostics,
-    );
+    let enabled = match (
+        map.get("enabled").and_then(Value::as_bool),
+        map.get("disabled").and_then(Value::as_bool),
+    ) {
+        (Some(enabled), _) => enabled,
+        (None, Some(disabled)) => !disabled,
+        (None, None) => true,
+    };
+    let timeout_ms =
+        parse_mcp_timeout(map.get("timeout"), &format!("{label}.timeout"), diagnostics);
     let kind = map.get("type").and_then(Value::as_str).unwrap_or_else(|| {
         if map.contains_key("url") {
             "remote"
@@ -1675,9 +1775,9 @@ fn parse_mcp_server(
                 _ => Vec::new(),
             };
             if command.is_empty() {
-                diagnostics.warnings.push(format!(
-                    "mcp.{name}.command must be a non-empty string array"
-                ));
+                diagnostics
+                    .warnings
+                    .push(format!("{label}.command must be a non-empty string array"));
                 return None;
             }
             Some(McpServerConfig::Local(McpLocalConfig {
@@ -1690,7 +1790,7 @@ fn parse_mcp_server(
                     .map(ToOwned::to_owned),
                 environment: parse_string_map(
                     map.get("environment").or_else(|| map.get("env")),
-                    &format!("mcp.{name}.environment"),
+                    &format!("{label}.environment"),
                     diagnostics,
                 ),
                 enabled,
@@ -1706,22 +1806,22 @@ fn parse_mcp_server(
             else {
                 diagnostics
                     .warnings
-                    .push(format!("mcp.{name}.url must be a non-empty string"));
+                    .push(format!("{label}.url must be a non-empty string"));
                 return None;
             };
             if !(url.starts_with("http://") || url.starts_with("https://")) {
                 diagnostics
                     .warnings
-                    .push(format!("mcp.{name}.url must be an http(s) URL"));
+                    .push(format!("{label}.url must be an http(s) URL"));
                 return None;
             }
             let (oauth_enabled, oauth_client_id, oauth_client_secret, oauth_scope) =
-                parse_mcp_oauth(name, map.get("oauth"), diagnostics);
+                parse_mcp_oauth(label, map.get("oauth"), diagnostics);
             Some(McpServerConfig::Remote(McpRemoteConfig {
                 url: url.to_string(),
                 headers: parse_string_map(
                     map.get("headers"),
-                    &format!("mcp.{name}.headers"),
+                    &format!("{label}.headers"),
                     diagnostics,
                 ),
                 enabled,
@@ -1733,16 +1833,16 @@ fn parse_mcp_server(
             }))
         }
         other => {
-            diagnostics.warnings.push(format!(
-                "mcp.{name}.type must be local or remote; got {other}"
-            ));
+            diagnostics
+                .warnings
+                .push(format!("{label}.type must be local or remote; got {other}"));
             None
         }
     }
 }
 
 fn parse_mcp_oauth(
-    name: &str,
+    label: &str,
     value: Option<&Value>,
     diagnostics: &mut ConfigDiagnostics,
 ) -> (bool, Option<String>, Option<String>, Option<String>) {
@@ -1755,7 +1855,7 @@ fn parse_mcp_oauth(
     let Some(map) = value.as_object() else {
         diagnostics
             .warnings
-            .push(format!("mcp.{name}.oauth must be an object or false"));
+            .push(format!("{label}.oauth must be an object or false"));
         return (true, None, None, None);
     };
     (
@@ -1800,6 +1900,29 @@ fn parse_string_map(
         }
     }
     out
+}
+
+fn parse_mcp_timeout(
+    value: Option<&Value>,
+    label: &str,
+    diagnostics: &mut ConfigDiagnostics,
+) -> Option<u64> {
+    match value {
+        None => None,
+        Some(Value::Number(number)) => number.as_u64(),
+        // OpenCode v2: `{ "startup", "request" | "catalog", "execution" }`.
+        // crabcode has one connect timeout, so only the startup/request budget applies.
+        Some(Value::Object(map)) => map
+            .get("startup")
+            .or_else(|| map.get("request"))
+            .and_then(Value::as_u64),
+        Some(_) => {
+            diagnostics
+                .warnings
+                .push(format!("{label} must be a number or timeout object"));
+            None
+        }
+    }
 }
 
 fn parse_optional_u64(
@@ -4612,5 +4735,69 @@ mod tests {
         };
         assert!(!disabled.oauth_enabled);
         assert!(diagnostics.warnings.is_empty());
+    }
+
+    #[test]
+    fn parses_opencode_v2_mcp_servers_and_still_reads_legacy_entries() {
+        let mut diagnostics = ConfigDiagnostics::default();
+        let config = parse_merged_config(
+            &json!({
+                "mcp": {
+                    "timeout": { "startup": 45000, "execution": 600000 },
+                    "servers": {
+                        "sentry": {
+                            "type": "remote",
+                            "url": "https://mcp.sentry.dev/mcp",
+                            "disabled": true,
+                            "timeout": { "startup": 12000 }
+                        }
+                    },
+                    "gh_grep": {
+                        "type": "remote",
+                        "url": "https://mcp.grep.app"
+                    }
+                }
+            }),
+            &mut diagnostics,
+        );
+
+        let sentry = match config.mcp.get("sentry") {
+            Some(McpServerConfig::Remote(remote)) => remote,
+            other => panic!("expected remote sentry, got {other:?}"),
+        };
+        assert!(!sentry.enabled);
+        assert_eq!(sentry.timeout_ms, Some(12_000));
+        assert!(config.mcp.get("gh_grep").is_some());
+        assert!(config.mcp.get("timeout").is_none());
+        assert!(config.mcp.get("servers").is_none());
+        assert!(diagnostics.warnings.is_empty());
+    }
+
+    #[test]
+    fn mcp_config_location_prefers_the_project_file_that_wins_the_merge() {
+        let xdg = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let global = xdg.path().join("crabcode/crabcode.jsonc");
+        fs::create_dir_all(global.parent().unwrap()).unwrap();
+        fs::write(
+            &global,
+            r#"{ "mcp": { "servers": { "sentry": { "type": "remote", "url": "https://mcp.sentry.dev/mcp" } } } }"#,
+        )
+        .unwrap();
+        let local = project.path().join("opencode.jsonc");
+        fs::write(
+            &local,
+            r#"{ "mcp": { "sentry": { "type": "remote", "url": "https://override.example/mcp" }, "gh_grep": { "url": "https://mcp.grep.app" } } }"#,
+        )
+        .unwrap();
+
+        let locations = mcp_config_locations(xdg.path(), project.path());
+        assert_eq!(locations.get("sentry"), Some(&local));
+        assert_eq!(locations.get("gh_grep"), Some(&local));
+        assert_eq!(
+            display_mcp_config_path(&local, project.path()),
+            "Project · opencode.jsonc"
+        );
+        assert!(display_mcp_config_path(&global, project.path()).starts_with("Global · "));
     }
 }

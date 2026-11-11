@@ -11,6 +11,7 @@ const ACTIVE_THEME_KEY: &str = "active_theme";
 const THEME_TRANSPARENT_KEY: &str = "theme_transparent";
 const TERMINAL_TITLE_ITEMS_KEY: &str = "terminal_title_items";
 const COMPACT_MODE_KEY: &str = "compact_mode";
+const ACTIVE_AGENT_KEY: &str = "active_agent";
 const SLASH_MRU_KEY: &str = "slash_mru";
 const DISABLED_SKILLS_KEY: &str = "disabled_skills";
 
@@ -225,6 +226,17 @@ impl PrefsDAO {
 
     pub fn set_compact_mode(&self, enabled: bool) -> Result<()> {
         self.set_pref(COMPACT_MODE_KEY, &enabled.to_string())
+    }
+
+    pub fn get_active_agent(&self) -> Result<Option<String>> {
+        Ok(self
+            .get_pref(ACTIVE_AGENT_KEY)?
+            .map(|agent| agent.trim().to_string())
+            .filter(|agent| !agent.is_empty()))
+    }
+
+    pub fn set_active_agent(&self, agent: &str) -> Result<()> {
+        self.set_pref(ACTIVE_AGENT_KEY, agent.trim())
     }
 
     /// Skills are enabled by default; only explicitly disabled names are saved.
@@ -603,5 +615,18 @@ mod tests {
 
         dao.set_compact_mode(true).unwrap();
         assert_eq!(dao.get_compact_mode().unwrap(), Some(true));
+    }
+
+    #[test]
+    fn test_active_agent_round_trip() {
+        let dao = setup_test_dao();
+
+        assert_eq!(dao.get_active_agent().unwrap(), None);
+
+        dao.set_active_agent("plan").unwrap();
+        assert_eq!(dao.get_active_agent().unwrap().as_deref(), Some("plan"));
+
+        dao.set_active_agent("  ").unwrap();
+        assert_eq!(dao.get_active_agent().unwrap(), None);
     }
 }

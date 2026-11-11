@@ -9,6 +9,7 @@ use ratatui::{
 use tui_textarea::TextArea;
 
 use crate::theme::ThemeColors;
+use crate::ui::components::dialog::dim_backdrop;
 use crate::ui::textarea_keys::input_textarea;
 
 pub const DEFAULT_REMOTE_BIND: &str = "0.0.0.0:8421";
@@ -139,6 +140,7 @@ pub fn render_remote_dialog(
         height: dialog_height,
     };
 
+    dim_backdrop(f, area, state.dialog_area);
     f.render_widget(Clear, state.dialog_area);
     f.render_widget(
         Paragraph::new("").style(Style::default().bg(colors.dialog_background)),

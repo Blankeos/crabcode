@@ -14,6 +14,8 @@ use unicode_width::UnicodeWidthStr;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderOAuthFlowMode {
     BrowserWaiting,
+    /// Authorization URL is shown first. Enter opens the browser; the link can be copied before that.
+    BrowserPrompt,
     HeadlessPreparing,
     HeadlessCode,
 }
@@ -25,6 +27,7 @@ pub struct ProviderOAuthFlowState {
     pub provider_label: String,
     pub url: Option<String>,
     pub code: Option<String>,
+    pub browser_opened: bool,
     dialog_area: Rect,
     link_area: Option<Rect>,
 }
@@ -37,6 +40,7 @@ impl ProviderOAuthFlowState {
             provider_label: "OpenAI".to_string(),
             url: None,
             code: None,
+            browser_opened: false,
             dialog_area: Rect::default(),
             link_area: None,
         }
@@ -52,6 +56,28 @@ impl ProviderOAuthFlowState {
         self.provider_label = provider_label.into();
         self.url = None;
         self.code = None;
+        self.browser_opened = false;
+    }
+
+    /// Show the authorization link before any browser is opened.
+    pub fn show_browser_prompt_for(&mut self, provider_label: impl Into<String>) {
+        self.visible = true;
+        self.mode = ProviderOAuthFlowMode::BrowserPrompt;
+        self.provider_label = provider_label.into();
+        self.url = None;
+        self.code = None;
+        self.browser_opened = false;
+    }
+
+    pub fn set_authorization_url(&mut self, url: String) {
+        if !self.visible {
+            return;
+        }
+        self.url = Some(url);
+    }
+
+    pub fn note_browser_opening(&mut self) {
+        self.browser_opened = true;
     }
 
     pub fn show_headless_preparing(&mut self) {
@@ -77,6 +103,7 @@ impl ProviderOAuthFlowState {
         self.visible = false;
         self.url = None;
         self.code = None;
+        self.browser_opened = false;
         self.link_area = None;
     }
 
@@ -97,6 +124,7 @@ pub enum ProviderOAuthFlowAction {
     NotHandled,
     Close,
     CopyLink(String),
+    OpenBrowser,
 }
 
 pub fn init_provider_oauth_flow() -> ProviderOAuthFlowState {
@@ -120,6 +148,14 @@ pub fn handle_provider_oauth_flow_key_event(
         if let Some(url) = &state.url {
             return ProviderOAuthFlowAction::CopyLink(url.clone());
         }
+    }
+
+    if event.code == KeyCode::Enter
+        && state.mode == ProviderOAuthFlowMode::BrowserPrompt
+        && state.url.is_some()
+        && !state.browser_opened
+    {
+        return ProviderOAuthFlowAction::OpenBrowser;
     }
 
     ProviderOAuthFlowAction::Handled
@@ -255,6 +291,50 @@ pub fn render_provider_oauth_flow(
                 chunks[3],
             );
         }
+        ProviderOAuthFlowMode::BrowserPrompt => {
+            let (primary, secondary) = if state.url.is_none() {
+                (
+                    "Preparing the authorization link...",
+                    "You can copy it before a browser opens.",
+                )
+            } else if state.browser_opened {
+                (
+                    "Opening your default browser. Waiting for callback...",
+                    "The link is still here if you need another browser.",
+                )
+            } else {
+                (
+                    "Press enter to open your default browser.",
+                    "Or copy the link and open it yourself.",
+                )
+            };
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![Span::raw(primary)]))
+                    .style(Style::default().fg(colors.text)),
+                chunks[2],
+            );
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![Span::styled(
+                    secondary,
+                    Style::default()
+                        .fg(colors.text_weak)
+                        .add_modifier(Modifier::DIM),
+                )])),
+                chunks[3],
+            );
+            if let Some(url) = state.url.clone() {
+                state.link_area = Some(chunks[4]);
+                frame.render_widget(
+                    Paragraph::new(Line::from(vec![Span::styled(
+                        url,
+                        Style::default()
+                            .fg(colors.primary)
+                            .add_modifier(Modifier::UNDERLINED),
+                    )])),
+                    chunks[4],
+                );
+            }
+        }
         ProviderOAuthFlowMode::HeadlessPreparing => {
             frame.render_widget(
                 Paragraph::new(Line::from(vec![Span::raw(format!(
@@ -320,7 +400,40 @@ pub fn render_provider_oauth_flow(
         }
     }
 
-    let footer = if state.url.is_some() {
+    let footer = if state.mode == ProviderOAuthFlowMode::BrowserPrompt
+        && state.url.is_some()
+        && !state.browser_opened
+    {
+        Line::from(vec![
+            Span::styled(
+                "open browser",
+                Style::default()
+                    .fg(colors.primary)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  "),
+            Span::styled(
+                "enter",
+                Style::default()
+                    .fg(colors.text_weak)
+                    .add_modifier(Modifier::DIM),
+            ),
+            Span::raw("    "),
+            Span::styled(
+                "copy link",
+                Style::default()
+                    .fg(colors.primary)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  "),
+            Span::styled(
+                "ctrl+y",
+                Style::default()
+                    .fg(colors.text_weak)
+                    .add_modifier(Modifier::DIM),
+            ),
+        ])
+    } else if state.url.is_some() {
         Line::from(vec![
             Span::styled(
                 "copy link",
@@ -346,4 +459,38 @@ pub fn render_provider_oauth_flow(
     };
 
     frame.render_widget(Paragraph::new(footer).alignment(Alignment::Left), chunks[8]);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::crossterm::event::KeyModifiers;
+
+    #[test]
+    fn enter_opens_browser_only_after_the_link_is_ready() {
+        let mut state = init_provider_oauth_flow();
+        state.show_browser_prompt_for("MCP sentry");
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(
+            handle_provider_oauth_flow_key_event(&mut state, enter),
+            ProviderOAuthFlowAction::Handled
+        );
+        state.set_authorization_url("https://auth.example/authorize".to_string());
+        assert_eq!(
+            handle_provider_oauth_flow_key_event(&mut state, enter),
+            ProviderOAuthFlowAction::OpenBrowser
+        );
+        state.note_browser_opening();
+        assert_eq!(
+            handle_provider_oauth_flow_key_event(&mut state, enter),
+            ProviderOAuthFlowAction::Handled
+        );
+        assert_eq!(
+            handle_provider_oauth_flow_key_event(
+                &mut state,
+                KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL),
+            ),
+            ProviderOAuthFlowAction::CopyLink("https://auth.example/authorize".to_string())
+        );
+    }
 }

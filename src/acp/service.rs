@@ -1429,42 +1429,6 @@ impl AcpService {
         user_message.provider = Some(session.provider.clone());
         user_message.model = Some(session.model.clone());
         user_message.agent_mode = Some(session.agent.clone());
-        let auto_compacted = self
-            .maybe_auto_compact_session(
-                &session_id,
-                &session,
-                cancellation.clone(),
-                crate::session::compaction::message_context_tokens(&user_message),
-            )
-            .await?;
-        if cancellation.is_cancelled() {
-            return Ok(PromptResponse::new(StopReason::Cancelled));
-        }
-        if auto_compacted {
-            messages = self
-                .session_manager
-                .lock()
-                .map_err(|_| internal_error())?
-                .get_session_ref(&session_id)
-                .map(|stored| stored.messages.clone())
-                .ok_or_else(|| Error::invalid_params().data("unknown session"))?;
-        }
-        {
-            let mut manager = self.session_manager.lock().map_err(|_| internal_error())?;
-            manager
-                .add_message_to_session(&session_id, &user_message)
-                .map_err(|_| internal_error())?;
-            attachment_guard.commit();
-            manager
-                .set_session_status(
-                    &session_id,
-                    crate::session::types::SessionStatus::Streaming,
-                    None,
-                )
-                .map_err(|_| internal_error())?;
-        }
-        messages.push(user_message);
-
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
         let process_registry = std::sync::Arc::new(crate::tools::ProcessRegistry::new());
         let prompt_registry = cancellable(
@@ -1504,12 +1468,48 @@ impl AcpService {
         let Some(system_prompt) = system_prompt else {
             return Ok(PromptResponse::new(StopReason::Cancelled));
         };
-        messages.insert(0, crate::session::types::Message::system(system_prompt));
-        let base_context_tokens = crate::session::compaction::total_context_tokens(&messages);
-        let base_cost = messages
-            .iter()
-            .filter_map(|message| message.cost)
-            .sum::<f64>();
+        let system_message = crate::session::types::Message::system(system_prompt);
+        let prompt_tokens = crate::session::compaction::message_context_tokens(&system_message);
+        let auto_compacted = self
+            .maybe_auto_compact_session(
+                &session_id,
+                &session,
+                &connection,
+                cancellation.clone(),
+                prompt_tokens,
+                crate::session::compaction::message_context_tokens(&user_message),
+            )
+            .await?;
+        if cancellation.is_cancelled() {
+            return Ok(PromptResponse::new(StopReason::Cancelled));
+        }
+        if auto_compacted {
+            messages = self
+                .session_manager
+                .lock()
+                .map_err(|_| internal_error())?
+                .get_session_ref(&session_id)
+                .map(|stored| stored.messages.clone())
+                .ok_or_else(|| Error::invalid_params().data("unknown session"))?;
+        }
+        {
+            let mut manager = self.session_manager.lock().map_err(|_| internal_error())?;
+            manager
+                .add_message_to_session(&session_id, &user_message)
+                .map_err(|_| internal_error())?;
+            attachment_guard.commit();
+            manager
+                .set_session_status(
+                    &session_id,
+                    crate::session::types::SessionStatus::Streaming,
+                    None,
+                )
+                .map_err(|_| internal_error())?;
+        }
+        messages.push(user_message);
+        let base_context_tokens = acp_context_tokens(&messages, prompt_tokens);
+        let base_cost = acp_session_cost(&messages);
+        messages = acp_request_messages(&messages, system_message);
         send_usage(
             &connection,
             &session_id,
@@ -1565,6 +1565,7 @@ impl AcpService {
                 &cancellation,
                 receiver,
                 base_context_tokens,
+                prompt_tokens,
                 base_cost,
             )
             .await?;
@@ -1574,7 +1575,14 @@ impl AcpService {
             && !turn.provider_failed
         {
             let _ = self
-                .maybe_auto_compact_session(&session_id, &session, cancellation.clone(), 0)
+                .maybe_auto_compact_session(
+                    &session_id,
+                    &session,
+                    &connection,
+                    cancellation.clone(),
+                    prompt_tokens,
+                    0,
+                )
                 .await?;
         }
         Ok(turn.response)
@@ -1589,6 +1597,7 @@ impl AcpService {
         cancellation: &CancellationToken,
         mut receiver: tokio::sync::mpsc::UnboundedReceiver<crate::llm::ChunkMessage>,
         base_context_tokens: usize,
+        base_prompt_tokens: usize,
         base_cost: f64,
     ) -> Result<PromptTurn, Error> {
         let mut assistant = crate::session::types::Message::incomplete("");
@@ -1697,6 +1706,9 @@ impl AcpService {
                                 usage.cache_write,
                                 estimate_session_usage_cost(session, &usage),
                             ));
+                        if let Some(part) = assistant.parts.last_mut() {
+                            part.data["acp_prompt_tokens"] = serde_json::json!(base_prompt_tokens);
+                        }
                         if usage.output > 0 {
                             assistant.output_tokens = Some(
                                 assistant
@@ -1900,17 +1912,7 @@ impl AcpService {
 
         match result {
             Ok(stats) => {
-                let feedback = format!(
-                    "Context compacted ({})",
-                    crate::session::compaction::format_compaction_stats(stats)
-                );
-                send_text(
-                    &connection,
-                    session_id,
-                    &cuid2::create_id(),
-                    feedback,
-                    false,
-                )?;
+                self.notify_compaction(session_id, &session, &connection, stats, 0)?;
                 Ok(PromptResponse::new(StopReason::EndTurn))
             }
             Err(_error) if cancellation.is_cancelled() => {
@@ -2019,7 +2021,9 @@ impl AcpService {
         &self,
         session_id: &str,
         session: &AcpSession,
+        connection: &ConnectionTo<Client>,
         cancellation: CancellationToken,
+        prompt_tokens: usize,
         additional_tokens: usize,
     ) -> Result<bool, Error> {
         let messages = self
@@ -2029,8 +2033,8 @@ impl AcpService {
             .get_session_ref(session_id)
             .map(|stored| stored.messages.clone())
             .ok_or_else(|| Error::invalid_params().data("unknown session"))?;
-        let used_tokens = crate::session::compaction::total_context_tokens(&messages)
-            .saturating_add(additional_tokens);
+        let used_tokens =
+            acp_context_tokens(&messages, prompt_tokens).saturating_add(additional_tokens);
         if !crate::session::compaction::should_auto_compact(
             &session.config.merged_config.compaction,
             used_tokens,
@@ -2078,13 +2082,125 @@ impl AcpService {
             )
             .map_err(|_| internal_error())?;
         match result {
-            Ok(_) => Ok(true),
+            Ok(stats) => {
+                self.notify_compaction(session_id, session, connection, stats, prompt_tokens)?;
+                Ok(true)
+            }
             Err(error) => {
                 crate::emit_log!("ACP auto-compaction skipped after failure: {:?}", error);
                 Ok(false)
             }
         }
     }
+
+    fn notify_compaction(
+        &self,
+        session_id: &str,
+        session: &AcpSession,
+        connection: &ConnectionTo<Client>,
+        stats: crate::session::types::CompactionStats,
+        prompt_tokens: usize,
+    ) -> Result<(), Error> {
+        let (used_tokens, cost) = {
+            let manager = self.session_manager.lock().map_err(|_| internal_error())?;
+            let stored = manager
+                .get_session_ref(session_id)
+                .ok_or_else(|| Error::invalid_params().data("unknown session"))?;
+            (
+                acp_context_tokens(&stored.messages, prompt_tokens),
+                acp_session_cost(&stored.messages),
+            )
+        };
+        send_text(
+            connection,
+            session_id,
+            &cuid2::create_id(),
+            format!(
+                "Context compacted ({})",
+                crate::session::compaction::format_compaction_stats(stats)
+            ),
+            false,
+        )?;
+        send_usage(
+            connection,
+            session_id,
+            session,
+            used_tokens,
+            (cost > 0.0).then_some(cost),
+            None,
+        )
+    }
+}
+
+fn acp_session_cost(messages: &[crate::session::types::Message]) -> f64 {
+    messages
+        .iter()
+        .map(|message| message.cost.unwrap_or_else(|| message.usage_cost()))
+        .sum()
+}
+
+fn acp_request_messages(
+    history: &[crate::session::types::Message],
+    system_message: crate::session::types::Message,
+) -> Vec<crate::session::types::Message> {
+    let mut messages = crate::session::compaction::filter_messages_for_context(history);
+    messages.insert(0, system_message);
+    messages
+}
+
+fn acp_context_tokens(messages: &[crate::session::types::Message], prompt_tokens: usize) -> usize {
+    let estimated =
+        crate::session::compaction::total_context_tokens(messages).saturating_add(prompt_tokens);
+    // Retained tail usage still describes the old context, as does the summary's billed usage.
+    let start = messages
+        .iter()
+        .rposition(crate::session::compaction::is_compaction_marker)
+        .map(|index| index + 1)
+        .unwrap_or(0);
+    for (index, message) in messages.iter().enumerate().skip(start).rev() {
+        if message.role != crate::session::types::MessageRole::Assistant {
+            continue;
+        }
+        // Each tool step bills its prompt again; cumulative usage is not a context size.
+        let provider_context = message
+            .parts
+            .iter()
+            .enumerate()
+            .filter_map(|(part_index, part)| {
+                let usage = part.recorded_usage()?;
+                let input = usage
+                    .input
+                    .saturating_add(usage.cache_read)
+                    .saturating_add(usage.cache_write);
+                if input == 0 {
+                    return None;
+                }
+                let mut tokens =
+                    usize::try_from(input.saturating_add(usage.output)).unwrap_or(usize::MAX);
+                if let Some(previous_prompt) = part
+                    .data
+                    .get("acp_prompt_tokens")
+                    .and_then(serde_json::Value::as_u64)
+                {
+                    tokens = tokens
+                        .saturating_sub(usize::try_from(previous_prompt).unwrap_or(usize::MAX))
+                        .saturating_add(prompt_tokens);
+                }
+                Some(tokens.saturating_add(
+                    crate::session::compaction::assistant_parts_context_tokens(
+                        &message.parts[part_index + 1..],
+                    ),
+                ))
+            })
+            .max()
+            .filter(|tokens| *tokens > 0);
+        if let Some(tokens) = provider_context {
+            let following =
+                crate::session::compaction::total_context_tokens(&messages[index + 1..]);
+            return estimated.max(tokens.saturating_add(following));
+        }
+    }
+    estimated
 }
 
 fn compaction_reasoning(session: &AcpSession) -> Option<crate::model::reasoning::ReasoningEffort> {
@@ -2285,6 +2401,14 @@ fn tool_permissions(session: &AcpSession) -> crate::tools::ToolPermissions {
     session.tool_permissions.clone()
 }
 
+fn mode_description(agent: &crate::agent::definition::AgentDefinition) -> &str {
+    if agent.name == "compaction" && agent.description.trim().is_empty() {
+        "Compaction agent. Summarizes conversation context for continued work."
+    } else {
+        &agent.description
+    }
+}
+
 fn session_modes(session: &AcpSession) -> SessionModeState {
     let mut modes = session
         .config
@@ -2294,7 +2418,7 @@ fn session_modes(session: &AcpSession) -> SessionModeState {
         .into_iter()
         .map(|agent| {
             SessionMode::new(agent.name.clone(), agent.name.clone())
-                .description(agent.description.clone())
+                .description(mode_description(agent))
         })
         .collect::<Vec<_>>();
     modes.sort_by(|left, right| left.name.cmp(&right.name));
@@ -2310,7 +2434,7 @@ fn session_config_options(session: &AcpSession) -> Vec<SessionConfigOption> {
         .into_iter()
         .map(|agent| {
             SessionConfigSelectOption::new(agent.name.clone(), agent.name.clone())
-                .description(agent.description.clone())
+                .description(mode_description(agent))
         })
         .collect::<Vec<_>>();
     mode_options.sort_by(|left, right| left.name.cmp(&right.name));
@@ -2368,13 +2492,50 @@ fn model_config_option(
         }
     }
 
-    SessionConfigOption::select(
-        "model",
-        "Model",
-        format!("{provider}/{model_id}"),
-        model_groups,
-    )
-    .category(SessionConfigOptionCategory::Model)
+    // T3 Code's ACP registry probe keeps the first 256 models in advertisement
+    // order. Lead with the active provider, then smaller catalogs, so that
+    // truncation still includes the models this session can run.
+    let current_value = format!("{provider}/{model_id}");
+    let model_groups = prioritize_model_groups(model_groups, provider, &current_value);
+
+    SessionConfigOption::select("model", "Model", current_value, model_groups)
+        .category(SessionConfigOptionCategory::Model)
+}
+
+fn prioritize_model_groups(
+    mut groups: Vec<SessionConfigSelectGroup>,
+    provider: &str,
+    current_value: &str,
+) -> Vec<SessionConfigSelectGroup> {
+    let Some(current_index) = groups
+        .iter()
+        .position(|group| group.group.to_string() == provider)
+    else {
+        sort_model_groups_by_size(&mut groups);
+        return groups;
+    };
+
+    let mut current = groups.remove(current_index);
+    if let Some(option_index) = current
+        .options
+        .iter()
+        .position(|option| option.value.to_string() == current_value)
+    {
+        let selected = current.options.remove(option_index);
+        current.options.insert(0, selected);
+    }
+    sort_model_groups_by_size(&mut groups);
+    groups.insert(0, current);
+    groups
+}
+
+fn sort_model_groups_by_size(groups: &mut [SessionConfigSelectGroup]) {
+    groups.sort_by(|left, right| {
+        left.options
+            .len()
+            .cmp(&right.options.len())
+            .then_with(|| left.name.cmp(&right.name))
+    });
 }
 
 fn model_value(model: &crate::model::types::Model) -> String {
@@ -3494,11 +3655,68 @@ fn system_time_to_iso8601(value: std::time::SystemTime) -> String {
 }
 
 fn internal_error() -> Error {
-    Error::internal_error().data("Crabcode ACP operation failed")
+    Error::new(-32603, "Crabcode ACP operation failed")
 }
 
 fn internal_error_with(error: &str) -> Error {
-    Error::internal_error().data(format!("Crabcode ACP operation failed: {error}"))
+    Error::new(-32603, client_visible_error(error)).data(error.to_string())
+}
+
+/// ACP clients such as T3 Code display the JSON-RPC `message` and drop `data`.
+fn client_visible_error(error: &str) -> String {
+    let owned = embedded_json_message(error).unwrap_or_else(|| error.to_string());
+    let detail = owned.trim();
+    let clipped = clip_chars(detail, 400);
+    if clipped.is_empty() {
+        "Crabcode ACP operation failed".to_string()
+    } else {
+        clipped
+    }
+}
+
+fn embedded_json_message(error: &str) -> Option<String> {
+    let mut rest = error;
+    while let Some(start) = rest.find('{') {
+        let candidate = &rest[start..];
+        let mut values =
+            serde_json::Deserializer::from_str(candidate).into_iter::<serde_json::Value>();
+        if let Some(Ok(value)) = values.next() {
+            if let Some(message) = json_error_message(&value) {
+                return Some(message);
+            }
+        }
+        rest = &candidate[1..];
+    }
+    None
+}
+
+fn json_error_message(value: &serde_json::Value) -> Option<String> {
+    let message = value
+        .pointer("/error/message")
+        .or_else(|| value.pointer("/message"))
+        .and_then(serde_json::Value::as_str)?
+        .trim();
+    if message.is_empty() {
+        None
+    } else {
+        Some(message.to_string())
+    }
+}
+
+fn clip_chars(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let mut out = String::new();
+    for _ in 0..max_chars {
+        match chars.next() {
+            Some(ch) => out.push(ch),
+            None => return out,
+        }
+    }
+    if chars.next().is_some() {
+        out.pop();
+        out.push('…');
+    }
+    out
 }
 
 #[cfg(test)]
@@ -3666,6 +3884,373 @@ mod tests {
         assert_eq!(live.cumulative.input, 70_000);
         assert_eq!(live.cumulative.output, 300);
         assert_eq!(live.cumulative.cache_read, 60_000);
+    }
+
+    #[test]
+    fn acp_compaction_counts_provider_context_and_cached_input() {
+        use crate::session::types::{Message, MessagePart};
+        let mut assistant = Message::assistant("answer");
+        assistant
+            .parts
+            .push(MessagePart::usage(60_000, 200, 20_000, 5_000, 0.0));
+        let messages = vec![Message::user("question"), assistant];
+
+        assert_eq!(acp_context_tokens(&messages, 1_000), 85_200);
+    }
+
+    #[test]
+    fn acp_compaction_does_not_sum_context_across_tool_requests() {
+        use crate::session::types::{Message, MessagePart};
+        let mut assistant = Message::assistant("answer");
+        assistant
+            .parts
+            .push(MessagePart::usage(60_000, 200, 20_000, 0, 0.0));
+        assistant
+            .parts
+            .push(MessagePart::usage(10_000, 100, 40_000, 0, 0.0));
+
+        assert_eq!(
+            acp_context_tokens(&[Message::user("question"), assistant], 0),
+            80_200
+        );
+    }
+
+    #[test]
+    fn acp_compaction_uses_latest_turn_usage_and_counts_pending_history() {
+        use crate::session::types::{Message, MessagePart};
+        let mut old = Message::assistant("old answer");
+        old.parts.push(MessagePart::usage(90_000, 100, 0, 0, 0.0));
+        let mut latest = Message::assistant("new answer");
+        latest
+            .parts
+            .push(MessagePart::usage(50_000, 200, 0, 0, 0.0));
+        let pending = Message::user("continue");
+        let pending_tokens = crate::session::compaction::message_context_tokens(&pending);
+        let messages = vec![Message::user("question"), old, latest, pending];
+
+        assert_eq!(acp_context_tokens(&messages, 0), 50_200 + pending_tokens);
+    }
+
+    #[test]
+    fn acp_compaction_discards_provider_usage_before_compaction_boundary() {
+        use crate::session::types::{CompactionStats, Message, MessagePart};
+        let mut assistant = Message::assistant("old answer");
+        assistant
+            .parts
+            .push(MessagePart::usage(90_000, 100, 0, 0, 0.0));
+        let mut summary = Message::user(format!(
+            "{}\nsummary",
+            crate::session::compaction::SUMMARY_PREFIX
+        ));
+        summary
+            .parts
+            .push(MessagePart::usage(95_000, 500, 0, 0, 0.0));
+        let marker = crate::session::compaction::compaction_marker(CompactionStats {
+            before_tokens: 90_100,
+            after_tokens: 100,
+            before_messages: 2,
+            after_messages: 1,
+        });
+        let messages = vec![Message::user("question"), assistant, summary, marker];
+
+        assert_eq!(
+            acp_context_tokens(&messages, 1_000),
+            crate::session::compaction::total_context_tokens(&messages) + 1_000
+        );
+    }
+
+    #[test]
+    fn acp_compaction_honors_reserved_tokens_and_auto_setting() {
+        use crate::config::configuration::CompactionConfig;
+        use crate::session::types::{Message, MessagePart};
+        let mut assistant = Message::assistant("answer");
+        assistant
+            .parts
+            .push(MessagePart::usage(70_000, 0, 10_000, 0, 0.0));
+        let messages = vec![Message::user("history ".repeat(2_000)), assistant];
+        assert!(crate::session::compaction::select_messages_for_compaction(
+            &messages,
+            crate::session::compaction::DEFAULT_TAIL_TURNS,
+        )
+        .is_some());
+        let config = CompactionConfig::Settings {
+            auto: true,
+            prune: false,
+            reserved: Some(20_000),
+        };
+        let used = acp_context_tokens(&messages, 1_000);
+        assert!(crate::session::compaction::total_context_tokens(&messages) < 80_000);
+        assert!(crate::session::compaction::should_auto_compact(
+            &config,
+            used,
+            Some(100_000),
+            None
+        ));
+        assert!(!crate::session::compaction::should_auto_compact(
+            &config,
+            used,
+            Some(100_001),
+            None
+        ));
+        assert!(!crate::session::compaction::should_auto_compact(
+            &CompactionConfig::Disabled,
+            used,
+            Some(100_000),
+            None
+        ));
+        assert!(!crate::session::compaction::should_auto_compact(
+            &config, used, None, None
+        ));
+        let no_auto = CompactionConfig::Settings {
+            auto: false,
+            prune: false,
+            reserved: Some(20_000),
+        };
+        assert!(!crate::session::compaction::should_auto_compact(
+            &no_auto,
+            used,
+            Some(100_000),
+            None
+        ));
+    }
+
+    #[test]
+    fn acp_compaction_counts_prompt_and_pending_tokens_without_provider_usage() {
+        use crate::config::configuration::CompactionConfig;
+        use crate::session::types::Message;
+        let messages = vec![Message::user("history ".repeat(2_000))];
+        let history_tokens = crate::session::compaction::total_context_tokens(&messages);
+        let config = CompactionConfig::Settings {
+            auto: true,
+            prune: false,
+            reserved: Some(1_000),
+        };
+        let context_window = Some(history_tokens as u32 + 3_000);
+        assert!(!crate::session::compaction::should_auto_compact(
+            &config,
+            acp_context_tokens(&messages, 1_500),
+            context_window,
+            None,
+        ));
+        assert!(crate::session::compaction::should_auto_compact(
+            &config,
+            acp_context_tokens(&messages, 1_500) + 500,
+            context_window,
+            None,
+        ));
+    }
+
+    #[test]
+    fn acp_compaction_replaces_previous_prompt_estimate_in_provider_context() {
+        use crate::session::types::{Message, MessagePart};
+        let mut assistant = Message::assistant("answer");
+        let mut usage = MessagePart::usage(80_000, 200, 0, 0, 0.0);
+        usage.data["acp_prompt_tokens"] = serde_json::json!(5_000);
+        assistant.parts.push(usage);
+        let messages = vec![Message::user("question"), assistant];
+        assert_eq!(acp_context_tokens(&messages, 25_000), 100_200);
+        assert_eq!(acp_context_tokens(&messages, 1_000), 76_200);
+    }
+
+    #[test]
+    fn acp_compaction_keeps_provider_context_when_new_input_usage_is_missing() {
+        use crate::session::types::{Message, MessagePart};
+        for output in [0, 100] {
+            let mut previous = Message::assistant("previous answer");
+            previous
+                .parts
+                .push(MessagePart::usage(85_000, 200, 0, 0, 0.0));
+            let mut latest = Message::assistant("new answer");
+            let mut usage = MessagePart::usage(0, output, 0, 0, 0.0);
+            usage.data["acp_prompt_tokens"] = serde_json::json!(1_000);
+            latest.parts.push(usage);
+            let following_tokens = crate::session::compaction::message_context_tokens(&latest);
+            assert_eq!(
+                acp_context_tokens(&[Message::user("question"), previous, latest], 2_000),
+                85_200 + following_tokens
+            );
+        }
+    }
+
+    #[test]
+    fn acp_compaction_counts_tool_output_after_provider_usage() {
+        use crate::session::types::{Message, MessagePart};
+        let mut assistant = Message::assistant("answer");
+        assistant
+            .parts
+            .push(MessagePart::usage(80_000, 200, 0, 0, 0.0));
+        record_tool_result(
+            &mut assistant,
+            &crate::llm::ToolCallResult {
+                tool_call_id: "call_1".into(),
+                role: "tool".into(),
+                name: "read".into(),
+                content: serde_json::json!({"output_preview": "late tool output ".repeat(1_000)})
+                    .to_string(),
+            },
+        );
+        let mut following = Message::assistant("");
+        following.parts = assistant.parts[2..].to_vec();
+        let extra_tokens = crate::session::compaction::message_context_tokens(&following);
+        assert!(extra_tokens > 1_000);
+        assert_eq!(
+            acp_context_tokens(&[Message::user("question"), assistant], 0),
+            80_200 + extra_tokens
+        );
+    }
+
+    #[test]
+    fn acp_compaction_keeps_fresh_system_prompt_in_request() {
+        use crate::session::types::{CompactionStats, Message};
+        let summary = Message::user(format!(
+            "{}\nsummary",
+            crate::session::compaction::SUMMARY_PREFIX
+        ));
+        let tail = Message::assistant("retained answer");
+        let marker = crate::session::compaction::compaction_marker(CompactionStats {
+            before_tokens: 10_000,
+            after_tokens: 100,
+            before_messages: 3,
+            after_messages: 2,
+        });
+        let pending = Message::user("continue");
+        let history = vec![
+            Message::user("archived history"),
+            summary.clone(),
+            tail.clone(),
+            marker,
+            pending.clone(),
+        ];
+        let system = Message::system("fresh system instructions");
+        let request = acp_request_messages(&history, system.clone());
+        assert_eq!(request, vec![system, summary, tail, pending]);
+        assert_eq!(
+            crate::session::compaction::filter_messages_for_context(&request),
+            request
+        );
+    }
+
+    #[test]
+    fn acp_compaction_cost_keeps_summary_billing_without_double_counting() {
+        use crate::session::types::{Message, MessagePart};
+        let mut assistant = Message::assistant("answer");
+        assistant.cost = Some(0.25);
+        assistant
+            .parts
+            .push(MessagePart::usage(100, 20, 0, 0, 0.25));
+        let mut summary = Message::user(format!(
+            "{}\nsummary",
+            crate::session::compaction::SUMMARY_PREFIX
+        ));
+        summary.parts.push(MessagePart::usage(100, 20, 0, 0, 0.05));
+        assert!((acp_session_cost(&[assistant, summary]) - 0.30).abs() < f64::EPSILON);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn acp_compaction_notifies_client_of_reduced_context_and_summary_cost() {
+        use crate::session::types::{Message, MessagePart};
+        use agent_client_protocol::Agent;
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let workspace = tempfile::tempdir().unwrap();
+                let mut manager = SessionManager::new()
+                    .with_history_for_workspace(workspace.path())
+                    .unwrap();
+                let session_id = manager.create_session(Some("ACP compaction regression".into()));
+                let mut assistant = Message::assistant("old answer");
+                assistant
+                    .parts
+                    .push(MessagePart::usage(80_000, 200, 0, 0, 0.25));
+                let messages = vec![Message::user("history ".repeat(2_000)), assistant];
+                let selection = crate::session::compaction::select_messages_for_compaction(
+                    &messages,
+                    crate::session::compaction::DEFAULT_TAIL_TURNS,
+                )
+                .unwrap();
+                let mut session = test_session();
+                session.context_window = Some(100_000);
+                let summary = crate::llm::client::CompactionSummary {
+                    text: "Retained task details".into(),
+                    usage: crate::aisdk::chunk::TokenUsage {
+                        input: 3_000,
+                        output: 20,
+                        cache_read: 0,
+                        cache_write: 0,
+                    },
+                };
+                let (mut compacted, stats) = compacted_messages(
+                    &messages,
+                    &selection,
+                    &summary,
+                    &session,
+                    crate::session::compaction::total_context_tokens(&messages),
+                    messages.len(),
+                )
+                .unwrap();
+                let summary_message = compacted
+                    .iter_mut()
+                    .find(|message| crate::session::compaction::is_compaction_summary(message))
+                    .unwrap();
+                summary_message
+                    .parts
+                    .push(MessagePart::usage(0, 1, 0, 0, 0.05));
+                let expected_used =
+                    crate::session::compaction::total_context_tokens(&compacted) + 1_000;
+                manager
+                    .replace_session_messages(&session_id, compacted)
+                    .unwrap();
+                let service = AcpService {
+                    sessions: Arc::new(AsyncMutex::new(AcpSessions::default())),
+                    session_manager: Arc::new(Mutex::new(manager)),
+                    client_capabilities: Arc::new(Mutex::new(Default::default())),
+                };
+                let (observed_tx, mut observed_rx) = tokio::sync::mpsc::unbounded_channel();
+                let client = Client.builder().on_receive_notification(
+                    async move |notification: SessionNotification, _connection| {
+                        let _ = observed_tx.send(notification.update);
+                        Ok(())
+                    },
+                    agent_client_protocol::on_receive_notification!(),
+                );
+                Agent
+                    .builder()
+                    .connect_with(client, async move |connection| {
+                        service
+                            .notify_compaction(&session_id, &session, &connection, stats, 1_000)
+                            .unwrap();
+                        let feedback = tokio::time::timeout(
+                            std::time::Duration::from_secs(2),
+                            observed_rx.recv(),
+                        )
+                        .await
+                        .unwrap()
+                        .unwrap();
+                        assert!(matches!(feedback, SessionUpdate::AgentMessageChunk(_)));
+                        let update = tokio::time::timeout(
+                            std::time::Duration::from_secs(2),
+                            observed_rx.recv(),
+                        )
+                        .await
+                        .unwrap()
+                        .unwrap();
+                        let SessionUpdate::UsageUpdate(usage) = update else {
+                            panic!("missing usage update")
+                        };
+                        assert_eq!(usage.used, expected_used as u64);
+                        assert_eq!(usage.size, 100_000);
+                        assert!((usage.cost.unwrap().amount - 0.30).abs() < f64::EPSILON);
+                        service
+                            .session_manager
+                            .lock()
+                            .unwrap()
+                            .try_delete_session(&session_id)
+                            .unwrap();
+                        Ok(())
+                    })
+                    .await
+                    .unwrap();
+            })
+            .await;
     }
 
     #[test]
@@ -4469,7 +5054,7 @@ mod tests {
                 sender.send(crate::llm::ChunkMessage::Failed(diagnostic.into())).unwrap();
                 sender.send(crate::llm::ChunkMessage::End).unwrap();
                 let turn = service.receive_prompt_stream(
-                    &session_id, &session, &connection, &cancellation, receiver, 0, 0.0,
+                    &session_id, &session, &connection, &cancellation, receiver, 0, 0, 0.0,
                 ).await.expect("provider errors must not become ACP RPC errors");
                 assert_eq!(turn.response.stop_reason, StopReason::EndTurn);
                 service.sessions.lock().await.finish_prompt(&session_id);
@@ -4529,7 +5114,7 @@ mod tests {
                 sender.send(crate::llm::ChunkMessage::Text("The next turn works.".into())).unwrap();
                 sender.send(crate::llm::ChunkMessage::End).unwrap();
                 let turn = service.receive_prompt_stream(
-                    &session_id, &session, &connection, &cancellation, receiver, 0, 0.0,
+                    &session_id, &session, &connection, &cancellation, receiver, 0, 0, 0.0,
                 ).await.unwrap();
                 assert_eq!(turn.response.stop_reason, StopReason::EndTurn);
                 service.sessions.lock().await.finish_prompt(&session_id);
@@ -4617,7 +5202,7 @@ mod tests {
                     })).unwrap();
                 }
                 let stream = service.receive_prompt_stream(
-                    &session_id, &session, &connection, &cancellation, receiver, 0, 0.0,
+                    &session_id, &session, &connection, &cancellation, receiver, 0, 0, 0.0,
                 );
                 tokio::pin!(stream);
                 tokio::time::timeout(Duration::from_secs(2), async {
@@ -4948,12 +5533,88 @@ mod tests {
     }
 
     #[test]
+    fn compaction_mode_descriptions_preserve_configuration_and_visibility() {
+        let mut session = test_session();
+        assert!(!session_modes(&session)
+            .available_modes
+            .iter()
+            .any(|mode| mode.id.to_string() == "compaction"));
+
+        for description in ["", " \n ", "Use this agent to preserve project decisions."] {
+            let definitions = crate::agent::definition::parse_agent_definitions_from_config(
+                Some(&serde_json::json!({"compaction": {
+                    "mode": "primary", "description": description
+                }})),
+                &mut Vec::new(),
+            );
+            session.config.merged_config.agent_registry =
+                crate::agent::definition::AgentRegistry::with_definitions(None, definitions);
+            let expected = if description.trim().is_empty() {
+                "Compaction agent. Summarizes conversation context for continued work."
+            } else {
+                description
+            };
+            let modes = session_modes(&session);
+            let compaction = modes
+                .available_modes
+                .iter()
+                .find(|mode| mode.id.to_string() == "compaction")
+                .expect("configured compaction mode");
+            assert_eq!(compaction.description.as_deref(), Some(expected));
+            let config = serde_json::to_value(session_config_options(&session)).unwrap();
+            let compaction = config[0]["options"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|option| option["value"] == "compaction")
+                .expect("configured compaction option");
+            assert_eq!(compaction["description"], expected);
+            assert_eq!(
+                modes
+                    .available_modes
+                    .iter()
+                    .find(|mode| mode.id.to_string() == "build")
+                    .unwrap()
+                    .description
+                    .as_deref(),
+                Some("The default agent. Executes tools based on configured permissions.")
+            );
+        }
+
+        for settings in [
+            serde_json::json!({"mode": "subagent"}),
+            serde_json::json!({"mode": "primary", "hidden": true}),
+        ] {
+            let definitions = crate::agent::definition::parse_agent_definitions_from_config(
+                Some(&serde_json::json!({"compaction": settings})),
+                &mut Vec::new(),
+            );
+            session.config.merged_config.agent_registry =
+                crate::agent::definition::AgentRegistry::with_definitions(None, definitions);
+            assert!(!session_modes(&session)
+                .available_modes
+                .iter()
+                .any(|mode| mode.id.to_string() == "compaction"));
+            let config = serde_json::to_value(session_config_options(&session)).unwrap();
+            assert!(!config[0]["options"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|option| option["value"] == "compaction"));
+        }
+    }
+
+    #[test]
     fn builds_grouped_model_config_option() {
         let option = model_config_option(
             &[
+                model("zeta", "Zeta", "z1", "Z1"),
+                model("zeta", "Zeta", "z2", "Z2"),
+                model("zeta", "Zeta", "z3", "Z3"),
                 model("anthropic", "Anthropic", "claude", "Claude"),
-                model("openai", "OpenAI", "gpt-5", "GPT-5"),
+                model("alpha", "Alpha", "a1", "A1"),
                 model("openai", "OpenAI", "gpt-5-mini", "GPT-5 Mini"),
+                model("openai", "OpenAI", "gpt-5", "GPT-5"),
             ],
             "openai",
             "gpt-5",
@@ -4971,9 +5632,24 @@ mod tests {
         else {
             panic!("model options should be grouped");
         };
-        assert_eq!(groups.len(), 2);
-        assert_eq!(groups[1].name, "OpenAI");
-        assert_eq!(groups[1].options[1].value.to_string(), "openai/gpt-5-mini");
+        let names = groups
+            .iter()
+            .map(|group| group.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["OpenAI", "Alpha", "Anthropic", "Zeta"]);
+        assert_eq!(groups[0].options[0].value.to_string(), "openai/gpt-5");
+        assert_eq!(groups[0].options[1].value.to_string(), "openai/gpt-5-mini");
+    }
+
+    #[test]
+    fn acp_error_message_uses_provider_text() {
+        let error = client_visible_error(
+            r#"Streaming failed: provider_step_error error=Provider error: API error 401 Unauthorized: {"error":{"message":"Your API key has expired. Log in again.","type":"authentication_error","code":"UNAUTHORIZED"}}"#,
+        );
+        assert_eq!(error, "Your API key has expired. Log in again.");
+
+        let fallback = client_visible_error("session storage unavailable");
+        assert_eq!(fallback, "session storage unavailable");
     }
 
     #[test]

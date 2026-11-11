@@ -98,6 +98,70 @@ pub struct DialogAction {
     pub key: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DialogDetailMark {
+    None,
+    /// Prefix the value with a success check.
+    Ok,
+    /// Full-width underlined link. An empty label is expected.
+    Link,
+    /// Full-width muted line, such as a link that is still loading.
+    Muted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DialogDetail {
+    pub label: String,
+    pub value: String,
+    pub mark: DialogDetailMark,
+}
+
+impl DialogDetail {
+    pub fn new(label: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            value: value.into(),
+            mark: DialogDetailMark::None,
+        }
+    }
+
+    pub fn ok(label: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            value: value.into(),
+            mark: DialogDetailMark::Ok,
+        }
+    }
+
+    pub fn link(value: impl Into<String>) -> Self {
+        Self {
+            label: String::new(),
+            value: value.into(),
+            mark: DialogDetailMark::Link,
+        }
+    }
+
+    pub fn muted(value: impl Into<String>) -> Self {
+        Self {
+            label: String::new(),
+            value: value.into(),
+            mark: DialogDetailMark::Muted,
+        }
+    }
+}
+
+const DETAIL_LABEL_WIDTH: usize = 14;
+
+fn detail_row_text(label: &str, value: &str, width: usize) -> (String, String) {
+    let label = if label.width() >= DETAIL_LABEL_WIDTH {
+        Dialog::truncate_to_width(label, DETAIL_LABEL_WIDTH)
+    } else {
+        format!("{label}{}", " ".repeat(DETAIL_LABEL_WIDTH - label.width()))
+    };
+    let value = Dialog::truncate_to_width(value, width.saturating_sub(DETAIL_LABEL_WIDTH + 1));
+    (label, value)
+}
+
 fn dialog_action_key(hint: &str) -> Option<KeyEvent> {
     let (hint, modifiers) = match hint.strip_prefix("ctrl+") {
         Some(hint) => (hint, KeyModifiers::CONTROL),
@@ -125,6 +189,9 @@ pub struct Dialog {
     pub title: String,
     /// Secondary header text, drawn after `title` in the muted color.
     pub title_note: String,
+    /// Label/value rows drawn under the title and above the list. Empty keeps the normal spacer.
+    pub detail_rows: Vec<DialogDetail>,
+    detail_link_area: Option<(Rect, String)>,
     pub items: Vec<DialogItem>,
     pub grouped_items: HashMap<String, Vec<DialogItem>>,
     pub filtered_items: Vec<(String, Vec<DialogItem>)>,
@@ -167,6 +234,8 @@ impl Dialog {
         Self {
             title,
             title_note: String::new(),
+            detail_rows: Vec::new(),
+            detail_link_area: None,
             items: Vec::new(),
             grouped_items: HashMap::new(),
             filtered_items: Vec::new(),
@@ -209,11 +278,20 @@ impl Dialog {
     }
 
     pub fn with_search_visible(mut self, visible: bool) -> Self {
+        self.set_search_visible(visible);
+        self
+    }
+
+    pub fn set_search_visible(&mut self, visible: bool) {
+        if self.search_visible == visible {
+            return;
+        }
         self.search_visible = visible;
         if !visible {
             self.search_query.clear();
+            self.search_textarea = TextArea::default();
+            self.search_textarea.set_placeholder_text("Search");
         }
-        self
     }
 
     fn search_area_height(&self) -> u16 {
@@ -1148,10 +1226,25 @@ impl Dialog {
         }
     }
 
+    fn detail_block_height(&self) -> u16 {
+        if self.detail_rows.is_empty() {
+            1
+        } else {
+            // Leading gap under the title, the rows, then a gap before the list.
+            self.detail_rows.len() as u16 + 2
+        }
+    }
+
+    pub fn detail_link_at(&self, column: u16, row: u16) -> Option<String> {
+        let (area, url) = self.detail_link_area.as_ref()?;
+        area.contains(ratatui::layout::Position::new(column, row))
+            .then(|| url.clone())
+    }
+
     fn layout_constraints(&self) -> [ratatui::layout::Constraint; 6] {
         [
             ratatui::layout::Constraint::Length(1),
-            ratatui::layout::Constraint::Length(1),
+            ratatui::layout::Constraint::Length(self.detail_block_height()),
             ratatui::layout::Constraint::Length(self.search_area_height()),
             ratatui::layout::Constraint::Min(0),
             ratatui::layout::Constraint::Length(self.bottom_gap_height),
@@ -1803,6 +1896,56 @@ impl Dialog {
         self.shortcut_areas
             .push((esc_area, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
 
+        self.detail_link_area = None;
+        if !self.detail_rows.is_empty() {
+            let row_width = chunks[1].width as usize;
+            for (index, detail) in self.detail_rows.iter().enumerate() {
+                let y = chunks[1].y.saturating_add(index as u16 + 1);
+                if y >= chunks[1].bottom().saturating_sub(1) {
+                    break;
+                }
+                let area = Rect::new(chunks[1].x, y, chunks[1].width, 1);
+                let line = match detail.mark {
+                    DialogDetailMark::Link | DialogDetailMark::Muted => {
+                        let value = Self::truncate_to_width(&detail.value, row_width);
+                        if detail.mark == DialogDetailMark::Link {
+                            self.detail_link_area = Some((area, detail.value.clone()));
+                            Line::from(Span::styled(
+                                value,
+                                Style::default()
+                                    .fg(colors.markdown_link)
+                                    .add_modifier(Modifier::UNDERLINED),
+                            ))
+                        } else {
+                            Line::from(Span::styled(
+                                value,
+                                Style::default()
+                                    .fg(colors.text_weak)
+                                    .add_modifier(Modifier::DIM),
+                            ))
+                        }
+                    }
+                    DialogDetailMark::Ok | DialogDetailMark::None => {
+                        let value_width = if detail.mark == DialogDetailMark::Ok {
+                            row_width.saturating_sub(2)
+                        } else {
+                            row_width
+                        };
+                        let (label, value) =
+                            detail_row_text(&detail.label, &detail.value, value_width);
+                        let mut spans =
+                            vec![Span::styled(label, Style::default().fg(colors.text_weak))];
+                        if detail.mark == DialogDetailMark::Ok {
+                            spans.push(Span::styled("✓ ", Style::default().fg(colors.success)));
+                        }
+                        spans.push(Span::styled(value, Style::default().fg(colors.text)));
+                        Line::from(spans)
+                    }
+                };
+                frame.render_widget(Paragraph::new(line), area);
+            }
+        }
+
         if self.search_visible {
             self.search_textarea.set_style(
                 Style::default()
@@ -1829,10 +1972,14 @@ impl Dialog {
         let filtered_items = self.filtered_items.clone();
 
         if self.filtered_items.is_empty() {
-            content_lines.push(Line::from(vec![Span::styled(
-                "No results found",
-                Style::default().fg(colors.text_weak),
-            )]));
+            // An empty list with search hidden is a waiting state (the MCP auth
+            // link), not a failed search. The detail rows already explain it.
+            if self.search_visible {
+                content_lines.push(Line::from(vec![Span::styled(
+                    "No results found",
+                    Style::default().fg(colors.text_weak),
+                )]));
+            }
         } else {
             let mut item_index = 0;
 
@@ -2092,6 +2239,8 @@ impl Clone for Dialog {
         Self {
             title: self.title.clone(),
             title_note: self.title_note.clone(),
+            detail_rows: self.detail_rows.clone(),
+            detail_link_area: None,
             items: self.items.clone(),
             grouped_items: self.grouped_items.clone(),
             filtered_items: self.filtered_items.clone(),

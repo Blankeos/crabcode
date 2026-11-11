@@ -1,5 +1,6 @@
 use crate::mcp::McpServerView;
 use crate::theme::ThemeColors;
+use crate::ui::components::dialog::dim_backdrop;
 use ratatui::layout::{Alignment, Constraint, Direction, Flex, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
@@ -53,6 +54,7 @@ pub fn render_status_dialog(
         .areas(dialog_area);
     state.area = Some(dialog_area);
 
+    dim_backdrop(frame, area, dialog_area);
     frame.render_widget(Clear, dialog_area);
 
     let block = Block::default()

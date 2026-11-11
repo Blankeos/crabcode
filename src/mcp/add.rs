@@ -199,13 +199,23 @@ fn upsert_mcp_server(text: &str, name: &str, server: &Value) -> Result<String> {
 }
 
 fn fresh_config(name: &str, server: &Value) -> String {
-    let mut mcp = Map::new();
-    mcp.insert(name.to_string(), server.clone());
     let mut root = Map::new();
-    root.insert("mcp".to_string(), Value::Object(mcp));
+    root.insert("mcp".to_string(), mcp_container(name, server));
     let mut pretty = serde_json::to_string_pretty(&Value::Object(root)).expect("json object");
     pretty.push('\n');
     pretty
+}
+
+fn mcp_container(name: &str, server: &Value) -> Value {
+    let mut mcp = Map::new();
+    mcp.insert("servers".to_string(), servers_container(name, server));
+    Value::Object(mcp)
+}
+
+fn servers_container(name: &str, server: &Value) -> Value {
+    let mut servers = Map::new();
+    servers.insert(name.to_string(), server.clone());
+    Value::Object(servers)
 }
 
 fn parse_config(text: &str) -> Result<Value> {
@@ -236,14 +246,47 @@ fn ensure_preserved(before: &Value, after: &Value, name: &str, server: &Value) -
     let Some(mcp) = after_obj.get("mcp").and_then(Value::as_object) else {
         bail!("mcp must be an object");
     };
-    if mcp.get(name) != Some(server) {
-        bail!("mcp.{name} was not written");
+    if written_server(mcp, name) != Some(server) {
+        bail!("mcp server {name} was not written");
     }
     if let Some(before_mcp) = before_obj.get("mcp").and_then(Value::as_object) {
         for (key, value) in before_mcp {
-            if key != name && mcp.get(key) != Some(value) {
+            if key == name {
+                continue;
+            }
+            if key == "servers" {
+                preserve_servers(value, mcp.get("servers"), name)?;
+                continue;
+            }
+            if mcp.get(key) != Some(value) {
                 bail!("refusing to rewrite config; mcp.{key} would change");
             }
+        }
+    }
+    Ok(())
+}
+
+fn written_server<'a>(mcp: &'a Map<String, Value>, name: &str) -> Option<&'a Value> {
+    mcp.get("servers")
+        .and_then(Value::as_object)
+        .and_then(|servers| servers.get(name))
+        .or_else(|| mcp.get(name))
+}
+
+fn preserve_servers(before: &Value, after: Option<&Value>, name: &str) -> Result<()> {
+    let Some(before_servers) = before.as_object() else {
+        if after != Some(before) {
+            bail!("refusing to rewrite config; mcp.servers would change");
+        }
+        return Ok(());
+    };
+    let after_servers = after.and_then(Value::as_object);
+    for (server_name, server_value) in before_servers {
+        if server_name == name {
+            continue;
+        }
+        if after_servers.and_then(|servers| servers.get(server_name)) != Some(server_value) {
+            bail!("refusing to rewrite config; mcp.servers.{server_name} would change");
         }
     }
     Ok(())
@@ -268,7 +311,7 @@ fn splice_server(text: &str, name: &str, server: &Value) -> Result<String> {
             text,
             &root,
             "mcp",
-            &mcp_value(name, server),
+            &mcp_container(name, server),
             &indent,
             nl,
         ));
@@ -284,24 +327,74 @@ fn splice_server(text: &str, name: &str, server: &Value) -> Result<String> {
         bail!("mcp must be an object");
     }
 
+    if let Some(servers_prop) = mcp_obj
+        .props
+        .iter()
+        .rev()
+        .find(|prop| prop.key == "servers")
+    {
+        let mut servers_cursor = Cursor::new(text);
+        servers_cursor.i = servers_prop.value_start;
+        if servers_cursor.peek() == Some('{') {
+            let servers_obj = servers_cursor.parse_object()?;
+            if servers_cursor.i == servers_prop.value_end && !object_is_server_config(&servers_obj)
+            {
+                if let Some(existing) = servers_obj.props.iter().rev().find(|prop| prop.key == name)
+                {
+                    return Ok(replace_value(text, existing, server, nl));
+                }
+                if let Some(existing) = mcp_obj.props.iter().rev().find(|prop| prop.key == name) {
+                    return Ok(replace_value(text, existing, server, nl));
+                }
+                let indent = object_child_indent(text, &servers_obj, Some(servers_prop.key_start));
+                return Ok(insert_property(
+                    text,
+                    &servers_obj,
+                    name,
+                    server,
+                    &indent,
+                    nl,
+                ));
+            }
+        }
+    }
+
     if let Some(existing) = mcp_obj.props.iter().rev().find(|prop| prop.key == name) {
-        let pad = line_indent(text, existing.key_start).unwrap_or_default();
-        let formatted = format_embedded(server, &pad, nl);
-        let mut out = String::new();
-        out.push_str(&text[..existing.value_start]);
-        out.push_str(&formatted);
-        out.push_str(&text[existing.value_end..]);
-        return Ok(out);
+        return Ok(replace_value(text, existing, server, nl));
+    }
+
+    // A legacy server literally named "servers" already owns that key.
+    if mcp_obj.props.iter().any(|prop| prop.key == "servers") {
+        let indent = object_child_indent(text, &mcp_obj, Some(mcp_prop.key_start));
+        return Ok(insert_property(text, &mcp_obj, name, server, &indent, nl));
     }
 
     let indent = object_child_indent(text, &mcp_obj, Some(mcp_prop.key_start));
-    Ok(insert_property(text, &mcp_obj, name, server, &indent, nl))
+    Ok(insert_property(
+        text,
+        &mcp_obj,
+        "servers",
+        &servers_container(name, server),
+        &indent,
+        nl,
+    ))
 }
 
-fn mcp_value(name: &str, server: &Value) -> Value {
-    let mut mcp = Map::new();
-    mcp.insert(name.to_string(), server.clone());
-    Value::Object(mcp)
+fn object_is_server_config(object: &Obj) -> bool {
+    object
+        .props
+        .iter()
+        .any(|prop| matches!(prop.key.as_str(), "type" | "url" | "command"))
+}
+
+fn replace_value(text: &str, existing: &Prop, server: &Value, nl: &str) -> String {
+    let pad = line_indent(text, existing.key_start).unwrap_or_default();
+    let formatted = format_embedded(server, &pad, nl);
+    let mut out = String::new();
+    out.push_str(&text[..existing.value_start]);
+    out.push_str(&formatted);
+    out.push_str(&text[existing.value_end..]);
+    out
 }
 
 fn insert_property(
@@ -645,7 +738,7 @@ mod tests {
         let text = fs::read_to_string(&path).unwrap();
         let value: Value = json5::from_str(&text).unwrap();
         assert_eq!(
-            value["mcp"]["context7"],
+            value["mcp"]["servers"]["context7"],
             json!({
                 "type": "remote",
                 "url": "https://mcp.context7.com/mcp"
@@ -681,8 +774,9 @@ mod tests {
         assert!(text.contains("https://mcp.grep.app"));
         let value: Value = json5::from_str(&text).unwrap();
         assert_eq!(value["model"], "openai/gpt-5");
+        assert_eq!(value["mcp"]["gh_grep"]["url"], "https://mcp.grep.app");
         assert_eq!(
-            value["mcp"]["everything"],
+            value["mcp"]["servers"]["everything"],
             json!({
                 "type": "local",
                 "command": ["npx", "-y", "server-everything"],
@@ -720,6 +814,31 @@ mod tests {
         assert_eq!(value["mcp"]["context7"]["headers"]["X-Token"], "secret");
         assert_eq!(value["mcp"]["other"]["url"], "https://other.example");
         assert!(!dir.path().join(".crabcode/crabcode.jsonc").exists());
+    }
+
+    #[test]
+    fn adds_into_existing_servers_map() {
+        let dir = tempfile::tempdir().unwrap();
+        let xdg = tempfile::tempdir().unwrap();
+        let config = dir.path().join(".crabcode/crabcode.jsonc");
+        fs::create_dir_all(config.parent().unwrap()).unwrap();
+        fs::write(
+            &config,
+            "{\n  \"mcp\": {\n    \"timeout\": { \"startup\": 1000 },\n    \"servers\": {\n      \"gh_grep\": { \"type\": \"remote\", \"url\": \"https://mcp.grep.app\" }\n    }\n  }\n}\n",
+        )
+        .unwrap();
+
+        add_mcp(sample(dir.path(), xdg.path(), false)).unwrap();
+        let value: Value = json5::from_str(&fs::read_to_string(&config).unwrap()).unwrap();
+        assert_eq!(value["mcp"]["timeout"]["startup"], 1000);
+        assert_eq!(
+            value["mcp"]["servers"]["gh_grep"]["url"],
+            "https://mcp.grep.app"
+        );
+        assert_eq!(
+            value["mcp"]["servers"]["context7"]["url"],
+            "https://mcp.context7.com/mcp"
+        );
     }
 
     #[test]

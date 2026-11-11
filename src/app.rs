@@ -24,7 +24,9 @@ use crate::push_toast;
 use crate::toast::{self, Toast, ToastAction, ToastLevel};
 use crate::ui::components::action_dialog::{ActionDialog, ActionDialogEvent, ActionDialogItem};
 use crate::ui::components::chat::{Chat, ChatImageTarget};
-use crate::ui::components::file_actions::{FileAction, FileActionEvent, FileActions};
+use crate::ui::components::file_actions::{
+    FileAction, FileActionEvent, FileActions, LinkActionTarget,
+};
 use crate::ui::components::find::{FindBar, FindBarAction};
 use crate::ui::components::input::Input;
 use crate::ui::components::popup::Popup;
@@ -54,8 +56,8 @@ use crate::views::jobs_dialog::{
     render_jobs_dialog, JobsDialogAction,
 };
 use crate::views::mcp_dialog::{
-    handle_mcp_dialog_key_event, handle_mcp_dialog_mouse_event, init_mcp_dialog, render_mcp_dialog,
-    McpDialogAction,
+    handle_mcp_dialog_key_event, handle_mcp_dialog_mouse_event, init_mcp_dialog,
+    mcp_server_details, render_mcp_dialog, McpDialogAction, McpServerRow,
 };
 use crate::views::models_dialog::{
     handle_models_dialog_key_event, handle_models_dialog_mouse_event, init_models_dialog,
@@ -201,6 +203,41 @@ impl From<crate::aisdk::retry::RetryStatus> for StreamingRetryStatus {
     }
 }
 
+/// Startup agent for the interactive app.
+/// `--agent` wins, then the last primary agent the user selected, then config
+/// `default_agent`, then Build.
+pub(crate) fn resolve_interactive_startup_agent(
+    registry: &crate::agent::definition::AgentRegistry,
+    cli_agent: Option<&str>,
+    persisted_agent: Option<&str>,
+    default_agent: Option<&str>,
+) -> anyhow::Result<String> {
+    if let Some(name) = cli_agent.map(str::trim).filter(|name| !name.is_empty()) {
+        if registry.primary_agent(name).is_none() {
+            anyhow::bail!(
+                "Unknown agent '{}'. Available: {}",
+                name,
+                registry.visible_primary_agent_names().join(", ")
+            );
+        }
+        return Ok(titlecase_agent_name(name));
+    }
+
+    if let Some(name) = persisted_agent
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .filter(|name| registry.primary_agent(name).is_some())
+    {
+        return Ok(titlecase_agent_name(name));
+    }
+
+    Ok(default_agent
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| "Build".to_string()))
+}
+
 pub(crate) fn titlecase_agent_name(name: &str) -> String {
     let name = name.trim();
     if name.is_empty() {
@@ -283,6 +320,7 @@ enum ProviderOAuthTaskMessage {
 
 #[derive(Debug)]
 enum McpOAuthTaskMessage {
+    AuthorizationUrl { name: String, url: String },
     Success { name: String },
     Failed { name: String, error: String },
 }
@@ -499,6 +537,7 @@ struct SelectionActionBarState {
 enum SelectionAction {
     AddToPrompt,
     Copy,
+    Cut,
     OpenInEditor,
     Dismiss,
 }
@@ -935,6 +974,9 @@ pub struct App {
     provider_oauth_in_progress: Option<OAuthProvider>,
     mcp_oauth_receiver: Option<tokio::sync::mpsc::UnboundedReceiver<McpOAuthTaskMessage>>,
     mcp_oauth_in_progress: Option<String>,
+    /// Resolves when the user presses enter on the MCP auth prompt. Dropped on cancel.
+    mcp_oauth_open_browser: Option<tokio::sync::oneshot::Sender<()>>,
+    mcp_oauth_url: Option<String>,
     compaction_receiver: Option<tokio::sync::mpsc::UnboundedReceiver<CompactionTaskMessage>>,
     compaction_pending: Option<CompactionPending>,
     storage_receiver: Option<tokio::sync::mpsc::UnboundedReceiver<StorageTaskMessage>>,
@@ -1111,14 +1153,22 @@ impl App {
         } else {
             ("big-pickle".to_string(), "opencode".to_string())
         };
-        let agent = cli_agent
-            .map(str::trim)
-            .filter(|name| !name.is_empty())
-            .map(titlecase_agent_name)
-            .unwrap_or_else(|| "Build".to_string());
 
         // Resolve real theme before first paint (avoids builtin flash).
         let prefs_dao = crate::persistence::PrefsDAO::new().ok();
+        let persisted_agent = if cli_agent.map(str::trim).is_none_or(|name| name.is_empty()) {
+            prefs_dao
+                .as_ref()
+                .and_then(|dao| dao.get_active_agent().ok().flatten())
+        } else {
+            None
+        };
+        let agent = cli_agent
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .or(persisted_agent.as_deref())
+            .map(titlecase_agent_name)
+            .unwrap_or_else(|| "Build".to_string());
         let prefs_theme_id = prefs_dao
             .as_ref()
             .and_then(|dao| dao.get_active_theme().ok().flatten());
@@ -1195,6 +1245,8 @@ impl App {
             provider_oauth_in_progress: None,
             mcp_oauth_receiver: None,
             mcp_oauth_in_progress: None,
+            mcp_oauth_open_browser: None,
+            mcp_oauth_url: None,
             compaction_receiver: None,
             compaction_pending: None,
             storage_receiver: None,
@@ -1352,22 +1404,15 @@ impl App {
             .with_skills(Self::skill_suggestions(&agent_registry)),
         );
 
-        let mut agent = self.agent.clone();
-        if let Some(default_agent) = loaded_config.merged_config.default_agent.clone() {
-            if !default_agent.trim().is_empty() && self.pending_cli_agent.is_none() {
-                agent = default_agent;
-            }
-        }
-        if let Some(name) = cli_agent.map(str::trim).filter(|name| !name.is_empty()) {
-            if agent_registry.primary_agent(name).is_none() {
-                anyhow::bail!(
-                    "Unknown agent '{}'. Available: {}",
-                    name,
-                    agent_registry.visible_primary_agent_names().join(", ")
-                );
-            }
-            agent = titlecase_agent_name(name);
-        }
+        let persisted_agent = prefs_dao
+            .as_ref()
+            .and_then(|dao| dao.get_active_agent().ok().flatten());
+        let agent = resolve_interactive_startup_agent(
+            &agent_registry,
+            cli_agent,
+            persisted_agent.as_deref(),
+            loaded_config.merged_config.default_agent.as_deref(),
+        )?;
 
         let (resolved_sounds, notification_warnings) =
             crate::sound::resolve_effective_sounds(&loaded_config.merged_config.notifications);
@@ -3458,6 +3503,22 @@ impl App {
         false
     }
 
+    fn try_cut_selection(&mut self) -> bool {
+        if !self.input.has_selection() {
+            return false;
+        }
+
+        let text = self.input.get_selected_text();
+        if text.is_empty() {
+            return false;
+        }
+        let _ = crate::utils::clipboard::copy_text(&text);
+        self.input.delete_selection();
+        self.selection_action_bar = None;
+        push_toast(Toast::new("Cut to clipboard", ToastLevel::Info, None));
+        true
+    }
+
     fn clear_selection(&mut self) -> bool {
         self.selection_action_bar = None;
         if self.chat_state.chat.has_selection() {
@@ -3640,6 +3701,13 @@ impl App {
         match key.code {
             KeyCode::Char('y') if key.modifiers == event::KeyModifiers::NONE => {
                 let _ = self.try_copy_selection();
+                true
+            }
+            KeyCode::Char('x')
+                if key.modifiers == event::KeyModifiers::NONE
+                    && state.target == SelectionActionTarget::Input =>
+            {
+                let _ = self.try_cut_selection();
                 true
             }
             KeyCode::Char('i')
@@ -4205,27 +4273,16 @@ impl App {
                     ProviderOAuthFlowAction::Handled => true,
                     ProviderOAuthFlowAction::NotHandled => false,
                     ProviderOAuthFlowAction::Close => {
+                        self.cancel_mcp_browser_open();
                         self.overlay_focus = OverlayFocus::None;
                         true
                     }
+                    ProviderOAuthFlowAction::OpenBrowser => {
+                        self.open_mcp_browser();
+                        true
+                    }
                     ProviderOAuthFlowAction::CopyLink(url) => {
-                        match crate::utils::clipboard::copy_text(&url) {
-                            Ok(_) => push_toast(Toast::new(
-                                format!(
-                                    "Copied {} login link",
-                                    self.provider_oauth_in_progress
-                                        .map(|provider| provider.label())
-                                        .unwrap_or("OAuth")
-                                ),
-                                ToastLevel::Info,
-                                None,
-                            )),
-                            Err(err) => push_toast(Toast::new(
-                                format!("Failed to copy link: {}", err),
-                                ToastLevel::Error,
-                                None,
-                            )),
-                        }
+                        self.copy_oauth_link(&url);
                         true
                     }
                 }
@@ -4874,6 +4931,11 @@ impl App {
         };
 
         self.agent = titlecase_agent_name(&definition.name);
+        if let Some(dao) = &self.prefs_dao {
+            if let Err(error) = dao.set_active_agent(&definition.name) {
+                crate::emit_log!("Failed to persist active agent preference: {}", error);
+            }
+        }
         let colors = self.get_current_theme_colors();
         let agent_color = crate::theme::agent_color(&self.agent, &colors);
         self.chat_state.wave_spinner.set_color(agent_color);
@@ -5288,6 +5350,10 @@ impl App {
                         let _ = self.try_copy_selection();
                         true
                     }
+                    SelectionAction::Cut => {
+                        let _ = self.try_cut_selection();
+                        true
+                    }
                     SelectionAction::OpenInEditor => self.open_selection_in_editor(),
                     SelectionAction::Dismiss => self.dismiss_selection_actions(),
                 }
@@ -5390,6 +5456,16 @@ impl App {
         self.file_actions = Some(FileActions::new(target, anchor));
     }
 
+    fn show_url_actions(&mut self, url: String, anchor: Position) {
+        self.validate_file_actions();
+        if self.overlay_focus != OverlayFocus::None {
+            return;
+        }
+        self.dismiss_selection_actions();
+        self.pending_chat_message_click = None;
+        self.file_actions = Some(FileActions::for_url(url, anchor));
+    }
+
     fn open_chat_image_target(&mut self, target: &ChatImageTarget, anchor: Position) {
         self.show_file_actions(
             FileHyperlinkTarget {
@@ -5404,14 +5480,7 @@ impl App {
     fn open_chat_hyperlink_target(&mut self, target: &HyperlinkTarget, anchor: Position) {
         match target {
             HyperlinkTarget::File(target) => self.show_file_actions(target.clone(), anchor),
-            HyperlinkTarget::Url(url) => match crate::utils::file_opener::open_url(url) {
-                Ok(()) => push_toast(Toast::new(format!("Opened {url}"), ToastLevel::Info, None)),
-                Err(err) => push_toast(Toast::new(
-                    format!("Failed to open link: {err}"),
-                    ToastLevel::Error,
-                    None,
-                )),
-            },
+            HyperlinkTarget::Url(url) => self.show_url_actions(url.clone(), anchor),
         }
     }
 
@@ -5426,7 +5495,7 @@ impl App {
                 let Some(popup) = self.file_actions.take() else {
                     return;
                 };
-                self.perform_file_action(action, popup.target);
+                self.perform_link_action(action, popup.target);
             }
         }
     }
@@ -5760,22 +5829,11 @@ impl App {
             match action {
                 ProviderOAuthFlowAction::Handled | ProviderOAuthFlowAction::NotHandled => {}
                 ProviderOAuthFlowAction::Close => {
+                    self.cancel_mcp_browser_open();
                     self.overlay_focus = OverlayFocus::None;
                 }
-                ProviderOAuthFlowAction::CopyLink(url) => {
-                    match crate::utils::clipboard::copy_text(&url) {
-                        Ok(_) => push_toast(Toast::new(
-                            "Copied OpenAI login link",
-                            ToastLevel::Info,
-                            None,
-                        )),
-                        Err(err) => push_toast(Toast::new(
-                            format!("Failed to copy link: {}", err),
-                            ToastLevel::Error,
-                            None,
-                        )),
-                    }
-                }
+                ProviderOAuthFlowAction::OpenBrowser => self.open_mcp_browser(),
+                ProviderOAuthFlowAction::CopyLink(url) => self.copy_oauth_link(&url),
             }
         } else if self.overlay_focus == OverlayFocus::SessionsDialog {
             let action = handle_sessions_dialog_mouse_event(&mut self.sessions_dialog_state, mouse);
@@ -9239,6 +9297,30 @@ impl App {
     }
 
     fn perform_file_action(&mut self, action: FileAction, target: FileHyperlinkTarget) {
+        self.perform_link_action(action, LinkActionTarget::File(target));
+    }
+
+    fn perform_link_action(&mut self, action: FileAction, target: LinkActionTarget) {
+        let target = match target {
+            LinkActionTarget::Url(url) => {
+                match action {
+                    FileAction::Copy => self.copy_text_with_toast(&url, "Copied URL"),
+                    FileAction::Open => match crate::utils::file_opener::open_url(&url) {
+                        Ok(()) => {
+                            push_toast(Toast::new(format!("Opened {url}"), ToastLevel::Info, None))
+                        }
+                        Err(err) => push_toast(Toast::new(
+                            format!("Failed to open link: {err}"),
+                            ToastLevel::Error,
+                            None,
+                        )),
+                    },
+                    FileAction::Reveal => {}
+                }
+                return;
+            }
+            LinkActionTarget::File(target) => target,
+        };
         if action == FileAction::Copy {
             match crate::utils::file_opener::absolute_file_path(&target.path) {
                 Ok(path) => {
@@ -9360,11 +9442,18 @@ impl App {
     }
 
     fn show_mcp_dialog(&mut self) {
-        let selected = self
-            .mcp_dialog_state
-            .dialog
-            .get_selected()
-            .map(|item| item.id.clone());
+        if !self.mcp_dialog_state.dialog.is_visible() {
+            self.mcp_dialog_state.return_to_list();
+        }
+        let selected = if self.mcp_dialog_state.actions_open() || self.mcp_dialog_state.auth_open()
+        {
+            None
+        } else {
+            self.mcp_dialog_state
+                .dialog
+                .get_selected()
+                .map(|item| item.id.clone())
+        };
         self.refresh_mcp_dialog_items();
         if let Some(selected) = selected {
             self.mcp_dialog_state
@@ -9379,37 +9468,57 @@ impl App {
         use crate::ui::components::dialog::DialogItem;
 
         let live = self.live_mcp_views();
-        let mut items = self
+        let project =
+            crate::config::configuration::discover_project_root(std::path::Path::new(&self.cwd));
+        let locations =
+            crate::config::configuration::mcp_config_locations_for(std::path::Path::new(&self.cwd));
+        let mut rows = self
             .remote_mcp_servers()
             .into_iter()
             .map(|server| {
+                let config = self.mcp.get(&server.name);
                 let live = live.iter().find(|view| view.name == server.name);
-                let status = live
-                    .map(|view| view.status.as_str())
-                    .unwrap_or(if server.enabled {
-                        "enabled"
-                    } else {
-                        "disabled"
-                    });
+                let status = live.map(|view| view.status.as_str()).unwrap_or(if server.enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                });
                 let detail = live.and_then(|view| view.detail.as_deref()).unwrap_or("");
                 let tip = if detail.is_empty() {
-                    status.to_string()
+                    crate::views::mcp_dialog::status_label(status).to_string()
                 } else {
-                    format!("{status}: {detail}")
+                    format!(
+                        "{}: {detail}",
+                        crate::views::mcp_dialog::status_label(status)
+                    )
                 };
-                DialogItem {
-                    id: server.name.clone(),
-                    name: server.name,
-                    group: "MCP".to_string(),
-                    description: String::new(),
-                    tip: Some(tip),
-                    provider_id: String::new(),
-                    active: server.enabled,
+                let oauth = config.is_some_and(|config| {
+                    matches!(config, crate::config::McpServerConfig::Remote(remote) if crate::mcp::oauth::should_use_oauth(remote))
+                });
+                McpServerRow {
+                    oauth,
+                    details: mcp_server_details(
+                        &server.name,
+                        config,
+                        live,
+                        locations.get(&server.name).map(|path| {
+                            crate::config::configuration::display_mcp_config_path(path, &project)
+                        }),
+                    ),
+                    item: DialogItem {
+                        id: server.name.clone(),
+                        name: server.name,
+                        group: "MCP".to_string(),
+                        description: String::new(),
+                        tip: Some(tip),
+                        provider_id: String::new(),
+                        active: server.enabled,
+                    },
                 }
             })
             .collect::<Vec<_>>();
-        items.sort_by(|a, b| a.id.cmp(&b.id));
-        self.mcp_dialog_state = init_mcp_dialog("MCP", items);
+        rows.sort_by(|a, b| a.item.id.cmp(&b.item.id));
+        self.mcp_dialog_state.set_servers(rows);
     }
 
     fn live_mcp_views(&self) -> Vec<crate::mcp::McpServerView> {
@@ -9429,9 +9538,11 @@ impl App {
                 match self.remote_toggle_mcp_server(&server_id) {
                     Ok(_) => {
                         self.refresh_mcp_dialog_items();
-                        self.mcp_dialog_state
-                            .dialog
-                            .select_item_by_key(&selected, "");
+                        if !self.mcp_dialog_state.actions_open() {
+                            self.mcp_dialog_state
+                                .dialog
+                                .select_item_by_key(&selected, "");
+                        }
                         self.mcp_dialog_state.dialog.show();
                     }
                     Err(err) => {
@@ -9445,18 +9556,13 @@ impl App {
                 }
             }
             McpDialogAction::Auth { server_id } => self.begin_mcp_oauth(&server_id),
+            McpDialogAction::ClearAuth { server_id } => self.clear_mcp_oauth(&server_id),
+            McpDialogAction::OpenBrowser => self.open_mcp_browser(),
+            McpDialogAction::CopyLink { url } => self.copy_oauth_link(&url),
         }
     }
 
-    fn begin_mcp_oauth(&mut self, name: &str) {
-        if self.mcp_oauth_in_progress.is_some() || self.provider_oauth_in_progress.is_some() {
-            push_toast(Toast::new(
-                "An OAuth flow is already in progress",
-                ToastLevel::Info,
-                None,
-            ));
-            return;
-        }
+    fn clear_mcp_oauth(&mut self, name: &str) {
         let Some(crate::config::McpServerConfig::Remote(remote)) = self.mcp.get(name).cloned()
         else {
             push_toast(Toast::new(
@@ -9474,24 +9580,143 @@ impl App {
             ));
             return;
         }
+        match crate::mcp::oauth::logout(name, &remote.url) {
+            Ok(removed) => {
+                self.drop_mcp_auth_session(name);
+                self.refresh_mcp_dialog_items();
+                self.mcp_dialog_state.dialog.show();
+                let message = if removed {
+                    format!("Cleared authentication for MCP server \"{name}\"")
+                } else {
+                    format!("No stored credentials for MCP server \"{name}\"")
+                };
+                push_toast(Toast::new(message, ToastLevel::Success, None));
+            }
+            Err(err) => {
+                self.play_sound_event(crate::sound::SoundEvent::Error);
+                push_toast(Toast::new(
+                    format!("Failed to clear MCP authentication: {err}"),
+                    ToastLevel::Error,
+                    Some(std::time::Duration::from_secs(4)),
+                ));
+            }
+        }
+    }
+
+    fn drop_mcp_auth_session(&mut self, name: &str) {
+        let Some(manager) = self.mcp_manager.clone() else {
+            return;
+        };
+        let name = name.to_string();
+        let dropped = manager
+            .try_lock()
+            .map(|mut guard| {
+                guard.drop_auth_sync(&name);
+                true
+            })
+            .unwrap_or(false);
+        if !dropped {
+            tokio::spawn(async move {
+                manager.lock().await.drop_auth_sync(&name);
+            });
+        }
+        self.refresh_mcp_summary();
+    }
+
+    fn cancel_mcp_browser_open(&mut self) {
+        self.mcp_oauth_open_browser.take();
+    }
+
+    fn open_mcp_browser(&mut self) {
+        let Some(url) = self.mcp_oauth_url.clone() else {
+            return;
+        };
+        if let Some(sender) = self.mcp_oauth_open_browser.take() {
+            let _ = sender.send(());
+        } else {
+            let _ = crate::utils::file_opener::open_url(&url);
+        }
+        self.mcp_dialog_state.note_browser_opened();
+    }
+
+    fn copy_oauth_link(&mut self, url: &str) {
+        match crate::utils::clipboard::copy_text(url) {
+            Ok(()) => push_toast(Toast::new(
+                "Copied login link".to_string(),
+                ToastLevel::Info,
+                None,
+            )),
+            Err(err) => push_toast(Toast::new(
+                format!("Failed to copy link: {err}"),
+                ToastLevel::Error,
+                None,
+            )),
+        }
+    }
+
+    fn begin_mcp_oauth(&mut self, name: &str) {
+        if self.mcp_oauth_in_progress.as_deref() == Some(name) {
+            self.present_mcp_auth(name);
+            if let Some(url) = self.mcp_oauth_url.clone() {
+                self.mcp_dialog_state.set_auth_url(url);
+            }
+            return;
+        }
+        if self.mcp_oauth_in_progress.is_some() || self.provider_oauth_in_progress.is_some() {
+            self.mcp_dialog_state.leave_auth();
+            push_toast(Toast::new(
+                "An OAuth flow is already in progress",
+                ToastLevel::Info,
+                None,
+            ));
+            return;
+        }
+        let Some(crate::config::McpServerConfig::Remote(remote)) = self.mcp.get(name).cloned()
+        else {
+            self.mcp_dialog_state.leave_auth();
+            push_toast(Toast::new(
+                format!("MCP server '{name}' is not a remote server"),
+                ToastLevel::Error,
+                None,
+            ));
+            return;
+        };
+        if !crate::mcp::oauth::should_use_oauth(&remote) {
+            self.mcp_dialog_state.leave_auth();
+            push_toast(Toast::new(
+                format!("MCP server '{name}' does not use OAuth"),
+                ToastLevel::Info,
+                None,
+            ));
+            return;
+        }
 
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel::<McpOAuthTaskMessage>();
+        let (open_tx, open_rx) = tokio::sync::oneshot::channel();
         self.mcp_oauth_receiver = Some(receiver);
         self.mcp_oauth_in_progress = Some(name.to_string());
-        self.provider_oauth_flow_state
-            .show_browser_waiting_for(format!("MCP {name}"));
-        self.mcp_dialog_state.dialog.hide();
-        self.overlay_focus = OverlayFocus::ProviderOAuthFlow;
+        self.mcp_oauth_open_browser = Some(open_tx);
+        self.mcp_oauth_url = None;
+        self.present_mcp_auth(name);
 
         let server_name = name.to_string();
         let mcp_config = self.mcp.clone();
         let workspace = std::path::PathBuf::from(&self.cwd);
+        let url_sender = sender.clone();
+        let url_name = server_name.clone();
         tokio::spawn(async move {
-            let auth =
-                crate::mcp::oauth::authenticate_with_url_callback(&server_name, &remote, |url| {
-                    let _ = crate::utils::file_opener::open_url(url);
-                })
-                .await;
+            let auth = crate::mcp::oauth::authenticate_with_browser_gate(
+                &server_name,
+                &remote,
+                move |url| {
+                    let _ = url_sender.send(McpOAuthTaskMessage::AuthorizationUrl {
+                        name: url_name,
+                        url,
+                    });
+                },
+                async move { open_rx.await.is_ok() },
+            )
+            .await;
             let result = match auth {
                 Ok(()) => {
                     let manager = crate::mcp::McpManager::ensure(mcp_config, workspace);
@@ -9510,6 +9735,29 @@ impl App {
         });
     }
 
+    fn present_mcp_auth(&mut self, name: &str) {
+        if !self.mcp_dialog_state.dialog.is_visible() {
+            self.show_mcp_dialog();
+        }
+        if !self.mcp_dialog_state.auth_open() {
+            self.mcp_dialog_state.open_auth(name);
+        }
+        self.mcp_dialog_state.dialog.show();
+        self.overlay_focus = OverlayFocus::McpDialog;
+    }
+
+    fn finish_mcp_auth_ui(&mut self) {
+        let restore = self.mcp_dialog_state.dialog.is_visible();
+        if self.mcp_dialog_state.auth_open() {
+            self.mcp_dialog_state.leave_auth();
+        }
+        self.refresh_mcp_dialog_items();
+        if restore {
+            self.mcp_dialog_state.dialog.show();
+            self.overlay_focus = OverlayFocus::McpDialog;
+        }
+    }
+
     fn process_mcp_oauth_events(&mut self) {
         let mut events = Vec::new();
         if let Some(receiver) = &mut self.mcp_oauth_receiver {
@@ -9519,30 +9767,34 @@ impl App {
         }
         for event in events {
             match event {
+                McpOAuthTaskMessage::AuthorizationUrl { url, .. } => {
+                    self.mcp_oauth_url = Some(url.clone());
+                    self.mcp_dialog_state.set_auth_url(url);
+                }
                 McpOAuthTaskMessage::Success { name } => {
+                    self.mcp_oauth_open_browser = None;
+                    self.mcp_oauth_url = None;
                     self.mcp_oauth_in_progress = None;
                     self.mcp_oauth_receiver = None;
-                    self.provider_oauth_flow_state.hide();
                     push_toast(Toast::new(
                         format!("Authenticated MCP server \"{name}\""),
                         ToastLevel::Success,
                         None,
                     ));
-                    self.show_mcp_dialog();
+                    self.finish_mcp_auth_ui();
                 }
                 McpOAuthTaskMessage::Failed { name, error } => {
+                    self.mcp_oauth_open_browser = None;
+                    self.mcp_oauth_url = None;
                     self.mcp_oauth_in_progress = None;
                     self.mcp_oauth_receiver = None;
-                    self.provider_oauth_flow_state.hide();
                     self.play_sound_event(crate::sound::SoundEvent::Error);
                     push_toast(Toast::new(
                         format!("MCP \"{name}\" auth failed: {error}"),
                         ToastLevel::Error,
                         Some(std::time::Duration::from_secs(6)),
                     ));
-                    if self.overlay_focus == OverlayFocus::ProviderOAuthFlow {
-                        self.show_mcp_dialog();
-                    }
+                    self.finish_mcp_auth_ui();
                 }
             }
         }
@@ -13189,7 +13441,9 @@ const CHAT_SELECTION_ACTION_ADD_TO_PROMPT_COL: usize = 8;
 const CHAT_SELECTION_ACTION_OPEN_IN_EDITOR_COL: usize = 24;
 const CHAT_SELECTION_ACTION_ESC_COL: usize = 43;
 const CHAT_SELECTION_ACTION_ESC_COL_NO_EDITOR: usize = 24;
-const INPUT_SELECTION_ACTION_ESC_COL: usize = 8;
+const INPUT_SELECTION_ACTION_CUT_COL: usize = 8;
+const INPUT_SELECTION_ACTION_ESC_COL: usize = 14;
+const JOBS_SELECTION_ACTION_ESC_COL: usize = 8;
 
 fn selection_action_for_column(state: SelectionActionBarState, column: usize) -> SelectionAction {
     match state.target {
@@ -13210,14 +13464,17 @@ fn selection_action_for_column(state: SelectionActionBarState, column: usize) ->
             SelectionAction::Dismiss
         }
         SelectionActionTarget::Chat => SelectionAction::Dismiss,
-        SelectionActionTarget::Input | SelectionActionTarget::JobsDetail
-            if column < INPUT_SELECTION_ACTION_ESC_COL =>
-        {
+        SelectionActionTarget::Input if column < INPUT_SELECTION_ACTION_CUT_COL => {
             SelectionAction::Copy
         }
-        SelectionActionTarget::Input | SelectionActionTarget::JobsDetail => {
-            SelectionAction::Dismiss
+        SelectionActionTarget::Input if column < INPUT_SELECTION_ACTION_ESC_COL => {
+            SelectionAction::Cut
         }
+        SelectionActionTarget::Input => SelectionAction::Dismiss,
+        SelectionActionTarget::JobsDetail if column < JOBS_SELECTION_ACTION_ESC_COL => {
+            SelectionAction::Copy
+        }
+        SelectionActionTarget::JobsDetail => SelectionAction::Dismiss,
     }
 }
 
@@ -13278,9 +13535,8 @@ fn selection_action_bar_width(state: SelectionActionBarState) -> u16 {
     match state.target {
         SelectionActionTarget::Chat if state.can_open_in_editor => SELECTION_ACTION_BAR_WIDTH,
         SelectionActionTarget::Chat => CHAT_SELECTION_ACTION_ESC_COL_NO_EDITOR as u16 + 4,
-        SelectionActionTarget::Input | SelectionActionTarget::JobsDetail => {
-            INPUT_SELECTION_ACTION_ESC_COL as u16 + 4
-        }
+        SelectionActionTarget::Input => INPUT_SELECTION_ACTION_ESC_COL as u16 + 4,
+        SelectionActionTarget::JobsDetail => JOBS_SELECTION_ACTION_ESC_COL as u16 + 4,
     }
 }
 
@@ -13357,6 +13613,16 @@ fn render_selection_action_bar(
         spans.push(Span::styled("esc", key_style));
         spans.push(Span::raw(" "));
         Line::from(spans)
+    } else if state.target == SelectionActionTarget::Input {
+        Line::from(vec![
+            Span::raw(" "),
+            Span::styled("y", key_style),
+            Span::styled(" copy ", label_style),
+            Span::styled("x", key_style),
+            Span::styled(" cut ", label_style),
+            Span::styled("esc", key_style),
+            Span::raw(" "),
+        ])
     } else {
         Line::from(vec![
             Span::raw(" "),
@@ -13684,7 +13950,7 @@ mod tests {
             },
             Position::new(2, 2),
         );
-        let target = &app.file_actions.as_ref().unwrap().target;
+        let target = app.file_actions.as_ref().unwrap().file_target().unwrap();
         assert!(target.path.is_absolute());
         assert_eq!(target.path.file_name().unwrap(), "file name.txt");
         assert_eq!(target.line, Some(14));
@@ -13862,7 +14128,7 @@ mod tests {
                 .expect("rendered relative chat link hitbox");
             app.handle_mouse_event(hit);
             let popup = app.file_actions.as_ref().expect("file actions after click");
-            assert_eq!(popup.target.path, path);
+            assert_eq!(popup.file_target().unwrap().path, path);
             assert_eq!(popup.copy_payload(), path.to_string_lossy());
             assert!(app.take_editor_suspend().is_none());
         }
@@ -13898,7 +14164,15 @@ mod tests {
             })
             .expect("rendered chat link hitbox");
         app.handle_mouse_event(hit);
-        assert_eq!(app.file_actions.as_ref().unwrap().target.path, path);
+        assert_eq!(
+            app.file_actions
+                .as_ref()
+                .unwrap()
+                .file_target()
+                .unwrap()
+                .path,
+            path
+        );
         assert!(app.take_editor_suspend().is_none());
         app.handle_keys(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         let buffer = terminal.backend().buffer();
@@ -13915,7 +14189,31 @@ mod tests {
             })
             .expect("rendered input image placeholder");
         app.handle_mouse_event(hit);
-        assert_eq!(app.file_actions.as_ref().unwrap().target.path, path);
+        assert_eq!(
+            app.file_actions
+                .as_ref()
+                .unwrap()
+                .file_target()
+                .unwrap()
+                .path,
+            path
+        );
+        assert!(app.take_editor_suspend().is_none());
+    }
+
+    #[test]
+    fn url_click_opens_action_menu_instead_of_the_browser() {
+        let mut app = test_app();
+        let url = "https://example.com/docs";
+        app.open_chat_hyperlink_target(&HyperlinkTarget::Url(url.into()), Position::new(4, 4));
+        let popup = app.file_actions.as_ref().expect("url action menu");
+        assert!(popup.file_target().is_none());
+        assert_eq!(popup.copy_payload(), url);
+        assert_eq!(popup.actions(), &[FileAction::Open, FileAction::Copy]);
+        app.handle_keys(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+        assert!(app.file_actions.is_some());
+        app.handle_keys(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.file_actions.is_none());
         assert!(app.take_editor_suspend().is_none());
     }
 
@@ -13979,6 +14277,8 @@ mod tests {
             provider_oauth_in_progress: None,
             mcp_oauth_receiver: None,
             mcp_oauth_in_progress: None,
+            mcp_oauth_open_browser: None,
+            mcp_oauth_url: None,
             compaction_receiver: None,
             compaction_pending: None,
             storage_receiver: None,
@@ -14551,6 +14851,68 @@ mod tests {
 
         app.handle_keys(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE));
         assert_eq!(app.agent, "Build");
+    }
+
+    #[test]
+    fn shift_tab_persists_agent_for_next_launch() {
+        let mut app = test_app();
+        app.prefs_dao = Some(crate::persistence::PrefsDAO::in_memory());
+
+        app.toggle_agent_mode();
+
+        assert_eq!(app.agent, "Plan");
+        assert_eq!(
+            app.prefs_dao
+                .as_ref()
+                .unwrap()
+                .get_active_agent()
+                .unwrap()
+                .as_deref(),
+            Some("plan")
+        );
+        assert_eq!(
+            resolve_interactive_startup_agent(
+                &app.agent_registry,
+                None,
+                Some("plan"),
+                Some("build"),
+            )
+            .unwrap(),
+            "Plan"
+        );
+    }
+
+    #[test]
+    fn startup_agent_prefers_cli_then_persisted_then_config() {
+        let registry = crate::agent::definition::AgentRegistry::default();
+
+        assert_eq!(
+            resolve_interactive_startup_agent(
+                &registry,
+                Some("plan"),
+                Some("build"),
+                Some("build")
+            )
+            .unwrap(),
+            "Plan"
+        );
+        assert_eq!(
+            resolve_interactive_startup_agent(&registry, None, Some("plan"), Some("build"))
+                .unwrap(),
+            "Plan"
+        );
+        assert_eq!(
+            resolve_interactive_startup_agent(&registry, None, Some("not-real"), Some("plan"))
+                .unwrap(),
+            "plan"
+        );
+        assert_eq!(
+            resolve_interactive_startup_agent(&registry, None, None, None).unwrap(),
+            "Build"
+        );
+        assert!(
+            resolve_interactive_startup_agent(&registry, Some("not-real"), None, None).is_err()
+        );
     }
 
     #[tokio::test]
@@ -15132,8 +15494,9 @@ mod tests {
             SelectionAction::Dismiss
         );
         assert_eq!(selection_action_for_column(input, 1), SelectionAction::Copy);
+        assert_eq!(selection_action_for_column(input, 8), SelectionAction::Cut);
         assert_eq!(
-            selection_action_for_column(input, 8),
+            selection_action_for_column(input, 14),
             SelectionAction::Dismiss
         );
     }
@@ -15202,6 +15565,34 @@ mod tests {
         assert_eq!(app.input.get_text(), "`alpha`");
         assert!(app.selection_action_bar.is_none());
         assert!(!app.chat_state.chat.has_selection());
+    }
+
+    #[test]
+    fn input_selection_x_cuts_selected_text() {
+        let mut app = test_app();
+        app.base_focus = BaseFocus::Chat;
+        app.last_frame_size = ratatui::layout::Rect::new(0, 0, 80, 24);
+        app.input.set_text("alpha beta");
+        app.input
+            .set_textarea_area_for_test(ratatui::layout::Rect::new(2, 20, 20, 1));
+
+        assert!(app.handle_input_mouse_event(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            2,
+            20
+        )));
+        assert!(app.handle_input_mouse_event(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            7,
+            20
+        )));
+        assert_eq!(app.input.get_selected_text(), "alpha");
+
+        app.handle_keys(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+
+        assert_eq!(app.input.get_text(), " beta");
+        assert!(!app.input.has_selection());
+        assert!(app.selection_action_bar.is_none());
     }
 
     #[test]
@@ -15292,7 +15683,7 @@ mod tests {
             app.selection_action_bar.map(|state| state.target),
             Some(SelectionActionTarget::Input)
         );
-        assert_eq!(app.current_selection_action_bar_area().unwrap().width, 12);
+        assert_eq!(app.current_selection_action_bar_area().unwrap().width, 18);
 
         let action_area = app.current_selection_action_bar_area().unwrap();
         app.handle_mouse_event(mouse(
