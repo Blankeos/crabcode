@@ -23,6 +23,7 @@ include = [
     "/src/**/*.jsonc",
     "/README.md",
     "/LICENSE",
+    "/install.sh",
     "/crabcode-logo.txt",
     "/favicon.png",
     "/mascot.txt",
